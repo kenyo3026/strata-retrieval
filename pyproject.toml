@@ -32,10 +32,10 @@ dev = [
     "ipykernel>=6.0.0",
 ]
 
-# [project.scripts]
-# Added once the cli/api/mcp adapters exist:
-# strata     = "strata.cli:main"
-# strata-api = "strata.api:main"
+[project.scripts]
+strata = "strata.cli:main"
+# Added once the api/mcp adapters exist:
+# strata-api = "strata.app:main"
 # strata-mcp = "strata.mcp:main"
 
 [tool.setuptools.packages.find]
