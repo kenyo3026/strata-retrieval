@@ -27,15 +27,20 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
+api = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+]
 dev = [
     "pytest>=7.0.0",
     "ipykernel>=6.0.0",
+    "httpx>=0.27.0",
 ]
 
 [project.scripts]
 strata = "strata.cli:main"
-# Added once the api/mcp adapters exist:
-# strata-api = "strata.app:main"
+strata-api = "strata.app:main"
+# Added once the mcp adapter exists:
 # strata-mcp = "strata.mcp:main"
 
 [tool.setuptools.packages.find]
