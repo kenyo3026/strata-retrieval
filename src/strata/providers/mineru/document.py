@@ -86,6 +86,13 @@ class MinerUDocument:
         # Full records for the page, in reading order (insertion order is doc order).
         return list(self._by_page.get(page_idx, []))
 
+    def read_block_with_context(self, bbox_id: str, n_prev: int = 1, n_next: int = 1) -> list[ChunkRecord]:
+        # The block plus its n_prev/n_next reading-order neighbours, in order.
+        pos = self._position[bbox_id]
+        lo = max(0, pos - n_prev)
+        hi = min(len(self.records), pos + n_next + 1)
+        return self.records[lo:hi]
+
     def list_blocks(self, label: Optional[str] = None, page: Optional[int] = None) -> list[BlockSummary]:
         summaries = []
         for r in self.records:
