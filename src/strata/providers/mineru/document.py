@@ -53,11 +53,20 @@ class MinerUDocument:
         self.records = records
         self._by_id = {r.bbox_id: r for r in records}
         self._by_page = defaultdict(list)
-        for r in records:
+        self._by_parent = defaultdict(list)   # composite bbox_id -> child SubBlock ids
+        self._position = {}                    # bbox_id -> index in reading order
+        for i, r in enumerate(records):
             self._by_page[r.page_idx].append(r)
+            self._position[r.bbox_id] = i
+            if r.parent_bbox_id is not None:
+                self._by_parent[r.parent_bbox_id].append(r.bbox_id)
 
     def read_block(self, bbox_id: str) -> ChunkRecord:
         return self._by_id[bbox_id]
+
+    def read_page(self, page_idx: int) -> list[ChunkRecord]:
+        # Full records for the page, in reading order (insertion order is doc order).
+        return list(self._by_page.get(page_idx, []))
 
     def list_blocks(self, label: Optional[str] = None, page: Optional[int] = None) -> list[BlockSummary]:
         summaries = []
@@ -96,3 +105,22 @@ class MinerUDocument:
             counts_by_label=dict(Counter(r.label for r in records)),
             block_ids=[r.bbox_id for r in records],
         )
+
+    def parent(self, bbox_id: str) -> Optional[str]:
+        # Composite parent id, or None for a top-level SubBlock.
+        return self._by_id[bbox_id].parent_bbox_id
+
+    def siblings(self, bbox_id: str) -> list[str]:
+        # Co-members under the same composite. Top-level blocks have no grouping.
+        parent_id = self._by_id[bbox_id].parent_bbox_id
+        if parent_id is None:
+            return []
+        return [bid for bid in self._by_parent[parent_id] if bid != bbox_id]
+
+    def next(self, bbox_id: str) -> Optional[str]:
+        pos = self._position[bbox_id] + 1
+        return self.records[pos].bbox_id if pos < len(self.records) else None
+
+    def prev(self, bbox_id: str) -> Optional[str]:
+        pos = self._position[bbox_id] - 1
+        return self.records[pos].bbox_id if pos >= 0 else None
