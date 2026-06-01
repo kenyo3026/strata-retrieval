@@ -1,0 +1,44 @@
+# .cursor
+.cursor/
+
+# .DS_Store
+.DS_Store
+
+# .python-version
+.python-version
+
+# __pycache__
+__pycache__
+
+# jupyter
+*.ipynb
+
+# directories
+scripts/
+
+# Python package development
+*.egg-info/
+build/
+dist/
+*.egg
+
+# Coverage reports
+.coverage
+coverage.xml
+htmlcov/
+
+# directories
+
+# test files
+
+# *.json
+*.json
+
+# TODO (root directory only)
+/TODO.md
+
+# .drow
+
+# prp
+.prps/*
+prp.md

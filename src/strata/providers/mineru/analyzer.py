@@ -1,0 +1,84 @@
+import pathlib
+from typing import Optional
+
+from ..base import DocAnalyzer
+from .chunk import ChunkRecord, flatten
+from .middle import MiddleJson
+
+
+# @dataclass
+# class MinerUArtifact:
+#     root: pathlib.Path
+#     name : str
+
+#     @classmethod
+#     def from_dir(cls, path: pathlib.Path, name: Optional[str] = None) -> "MinerUArtifact":
+#         return cls(root=path, name=name or path.parent.name)
+
+#     @property
+#     def middle_json(self) -> pathlib.Path:
+#         return self.root / f"{self.name}_middle.json"
+
+#     @property
+#     def content_list_json(self) -> pathlib.Path:
+#         return self.root / f"{self.name}_content_list.json"
+
+#     @property
+#     def images(self) -> list[pathlib.Path]:
+#         return sorted((self.root / "images").glob("*.jpg"))
+
+class MinerUArtifact(type(pathlib.Path())):
+
+    @classmethod
+    def from_dir(cls, path: pathlib.Path, basename: Optional[str] = None) -> "MinerUArtifact":
+        self = cls(path)
+        self._basename = basename
+        return self
+
+    @property
+    def basename(self) -> str:
+        return getattr(self, "_basename", None) or self.parent.name
+
+    @property
+    def middle_json(self) -> pathlib.Path:
+        return self / f"{self.basename}_middle.json"
+
+    @property
+    def model_json(self) -> pathlib.Path:
+        return self / f"{self.basename}_model.json"
+
+    @property
+    def content_list_json(self) -> pathlib.Path:
+        return self / f"{self.basename}_content_list.json"
+
+    @property
+    def layout_pdf(self) -> pathlib.Path:
+        return self / f"{self.basename}_layout.pdf"
+
+    @property
+    def origin_pdf(self) -> pathlib.Path:
+        return self / f"{self.basename}_origin.pdf"
+
+    @property
+    def span_pdf(self) -> pathlib.Path:
+        return self / f"{self.basename}_span.pdf"
+
+    @property
+    def md(self) -> pathlib.Path:
+        return self / f"{self.basename}.md"
+
+    @property
+    def images(self) -> list[pathlib.Path]:
+        return sorted((self / "images").glob("*.jpg"))
+
+
+class MinerUAnalyzer(DocAnalyzer):
+
+    def __init__(self, source: pathlib.Path):
+        self.source = source  # only accept the MinerU `auto` dir (or a MinerUArtifact)
+
+    def analyze(self, doc_id: Optional[str] = None) -> list[ChunkRecord]:
+        artifact = self.source if isinstance(self.source, MinerUArtifact) \
+            else MinerUArtifact.from_dir(self.source)
+        middle = MiddleJson.from_path(artifact.middle_json)
+        return flatten(middle, doc_id or artifact.basename)
