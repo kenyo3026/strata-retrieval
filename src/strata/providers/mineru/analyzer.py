@@ -75,10 +75,15 @@ class MinerUArtifact(type(pathlib.Path())):
 class MinerUAnalyzer(DocAnalyzer):
 
     def __init__(self, source: pathlib.Path):
-        self.source = source  # only accept the MinerU `auto` dir (or a MinerUArtifact)
+        # Accept the MinerU `auto` dir (or a MinerUArtifact); resolve the artifact once.
+        self.source = source
+        self.artifact = source if isinstance(source, MinerUArtifact) \
+            else MinerUArtifact.from_dir(pathlib.Path(source))
+
+    @property
+    def default_doc_id(self) -> str:
+        return self.artifact.basename
 
     def analyze(self, doc_id: Optional[str] = None) -> list[ChunkRecord]:
-        artifact = self.source if isinstance(self.source, MinerUArtifact) \
-            else MinerUArtifact.from_dir(self.source)
-        middle = MiddleJson.from_path(artifact.middle_json)
-        return flatten(middle, doc_id or artifact.basename)
+        middle = MiddleJson.from_path(self.artifact.middle_json)
+        return flatten(middle, doc_id or self.default_doc_id)
