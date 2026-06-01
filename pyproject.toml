@@ -31,6 +31,9 @@ api = [
     "fastapi>=0.115.0",
     "uvicorn>=0.32.0",
 ]
+mcp = [
+    "fastmcp>=2.0.0",
+]
 dev = [
     "pytest>=7.0.0",
     "ipykernel>=6.0.0",
@@ -40,8 +43,7 @@ dev = [
 [project.scripts]
 strata = "strata.cli:main"
 strata-api = "strata.app:main"
-# Added once the mcp adapter exists:
-# strata-mcp = "strata.mcp:main"
+strata-mcp = "strata.mcp:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
