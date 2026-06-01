@@ -5,6 +5,7 @@ operations (PRP section 4.3). Returns rich typed results -- serialization to
 dict / JSON / image-content is left to the interface adapters (cli/api/mcp).
 """
 
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Optional
@@ -34,6 +35,15 @@ class PageInfo:
 
 
 @dataclass
+class GrepMatch:
+    bbox_id      : str
+    page_idx     : int
+    label        : str
+    snippet      : str   # window centred on the match
+    match_offset : int   # offset of the match within the block content
+
+
+@dataclass
 class OutlineEntry:
     """One title in document order. `level` is MinerU's heading level (may be None)."""
     bbox_id : str
@@ -45,6 +55,14 @@ class OutlineEntry:
 def _snippet(content: str, length: int = _SNIPPET_LEN) -> str:
     collapsed = " ".join(content.split())
     return collapsed if len(collapsed) <= length else collapsed[:length] + "..."
+
+
+def _grep_snippet(content: str, start: int, end: int, window: int = 30) -> str:
+    lo = max(0, start - window)
+    hi = min(len(content), end + window)
+    prefix = "..." if lo > 0 else ""
+    suffix = "..." if hi < len(content) else ""
+    return prefix + " ".join(content[lo:hi].split()) + suffix
 
 
 class MinerUDocument:
@@ -86,6 +104,27 @@ class MinerUDocument:
                 )
             )
         return summaries
+
+    def grep(self, pattern: str, ignore_case: bool = False) -> list[GrepMatch]:
+        # Regex search over block content (inline $latex$ is already spliced in).
+        # One match (the first) per block; blocks with empty content are skipped.
+        regex = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
+        matches = []
+        for r in self.records:
+            if not r.content:
+                continue
+            m = regex.search(r.content)
+            if m:
+                matches.append(
+                    GrepMatch(
+                        bbox_id=r.bbox_id,
+                        page_idx=r.page_idx,
+                        label=r.label,
+                        snippet=_grep_snippet(r.content, m.start(), m.end()),
+                        match_offset=m.start(),
+                    )
+                )
+        return matches
 
     def outline(self, label_keyword: str = "title") -> list[OutlineEntry]:
         # Titles in document order. Match any label containing "title"
