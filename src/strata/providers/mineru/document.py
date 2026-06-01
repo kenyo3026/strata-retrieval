@@ -33,6 +33,15 @@ class PageInfo:
     block_ids       : list
 
 
+@dataclass
+class OutlineEntry:
+    """One title in document order. `level` is MinerU's heading level (may be None)."""
+    bbox_id : str
+    title   : str
+    page    : int
+    level   : Optional[int]
+
+
 def _snippet(content: str, length: int = _SNIPPET_LEN) -> str:
     collapsed = " ".join(content.split())
     return collapsed if len(collapsed) <= length else collapsed[:length] + "..."
@@ -68,6 +77,15 @@ class MinerUDocument:
                 )
             )
         return summaries
+
+    def outline(self, label_keyword: str = "title") -> list[OutlineEntry]:
+        # Titles in document order. Match any label containing "title"
+        # (title / doc_title / paragraph_title) to stay robust to MinerU's open vocab.
+        return [
+            OutlineEntry(bbox_id=r.bbox_id, title=r.content, page=r.page_idx, level=r.level)
+            for r in self.records
+            if label_keyword in r.label
+        ]
 
     def page_info(self, page_idx: int) -> PageInfo:
         records = self._by_page.get(page_idx, [])

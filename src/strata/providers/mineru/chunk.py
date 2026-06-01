@@ -47,6 +47,7 @@ class ChunkRecord:
     inline_equations : list            # inline formula LaTeX strings
     has_equation     : bool
     has_image        : bool
+    level            : Optional[int]  = None  # heading level, titles only
     from_discarded   : bool = False
     sub_chunks       : Optional[list] = None
 
@@ -146,6 +147,7 @@ def flatten(middle: MiddleJson, doc_id: str) -> list[ChunkRecord]:
                         inline_equations=inline_equations,
                         has_equation=has_equation,
                         has_image=image_path is not None,
+                        level=composite.raw.get("level"),
                     )
                 )
 
