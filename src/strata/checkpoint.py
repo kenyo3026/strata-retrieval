@@ -46,6 +46,9 @@ class DocCheckpoint(type(pathlib.Path())):
     def save(self, source: Union[str, pathlib.Path], doc_id: str, provider: str) -> "DocCheckpoint":
         # Back up the artifact dir verbatim and record how to re-open it.
         # Overwrites any existing checkpoint for this doc_id (re-backup on re-open).
+        if pathlib.Path(source).resolve() == self.artifact.resolve():
+            return self   # source is already this backup -- nothing to copy
+
         self.mkdir(parents=True, exist_ok=True)
 
         if self.artifact.exists():
