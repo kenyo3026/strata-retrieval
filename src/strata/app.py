@@ -30,7 +30,7 @@ def _dump(result):
     return asdict(result) if is_dataclass(result) else result
 
 
-def create_app() -> FastAPI:
+def create_app(sources: Optional[list[str]] = None) -> FastAPI:
     app = FastAPI(title="strata-retrieval", version="0.1.0")
     main = Main()
 
@@ -109,6 +109,9 @@ def create_app() -> FastAPI:
     def page_info(doc_id: str, page_idx: int):
         return _dump(_doc(doc_id).page_info(page_idx))
 
+    for source in sources or []:
+        main.open(source)
+
     return app
 
 
@@ -119,11 +122,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run the strata-retrieval API server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--source",
+        action="append",
+        metavar="DIR",
+        help="MinerU artifact dir to open at startup (repeatable). doc_id defaults to its basename.",
+    )
     args = parser.parse_args()
 
     import uvicorn
 
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(create_app(sources=args.source), host=args.host, port=args.port)
     return 0
 
 
