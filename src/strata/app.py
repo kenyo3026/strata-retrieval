@@ -5,6 +5,10 @@ for the life of the server and addressed by doc_id. Holds no domain logic.
 
 pydantic is used only where FastAPI requires it (the POST /open request body);
 responses are plain dataclass-derived dicts, not pydantic models.
+
+The app is built by the `create_app` factory -- there is no eager module-level
+instance, so importing this module has no side effects. Launch via the
+`strata-api` entry point (`main()`), or `uvicorn --factory strata.app:create_app`.
 """
 
 import argparse
@@ -116,9 +120,6 @@ def create_app(sources: Optional[list[str]] = None, checkpoint_root: Optional[st
         main.open(source)
 
     return app
-
-
-app = create_app()
 
 
 def main() -> int:
