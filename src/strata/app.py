@@ -16,7 +16,10 @@ from pydantic import BaseModel
 
 from .main import Main
 from .providers.factory import ProviderType
+from .utils.projects import find_project_root
 
+
+DEFAULT_CHECKPOINT_ROOT = str(find_project_root() / "checkpoint")
 
 class OpenRequest(BaseModel):
     source: str
@@ -30,9 +33,9 @@ def _dump(result):
     return asdict(result) if is_dataclass(result) else result
 
 
-def create_app(sources: Optional[list[str]] = None) -> FastAPI:
+def create_app(sources: Optional[list[str]] = None, checkpoint_root: Optional[str] = None) -> FastAPI:
     app = FastAPI(title="strata-retrieval", version="0.1.0")
-    main = Main()
+    main = Main(checkpoint_root=checkpoint_root)
 
     def _doc(doc_id: str):
         try:
@@ -128,11 +131,21 @@ def main() -> int:
         metavar="DIR",
         help="MinerU artifact dir to open at startup (repeatable). doc_id defaults to its basename.",
     )
+    parser.add_argument(
+        "--checkpoint",
+        metavar="DIR",
+        help="Persist opened docs here; reuse the same dir to inherit them on restart.",
+        default=DEFAULT_CHECKPOINT_ROOT,
+    )
     args = parser.parse_args()
 
     import uvicorn
 
-    uvicorn.run(create_app(sources=args.source), host=args.host, port=args.port)
+    uvicorn.run(
+        create_app(sources=args.source, checkpoint_root=args.checkpoint),
+        host=args.host,
+        port=args.port,
+    )
     return 0
 
 
