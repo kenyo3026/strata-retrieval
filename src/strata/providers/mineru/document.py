@@ -26,12 +26,14 @@ class DocSummary:
 @dataclass
 class BlockSummary:
     """Compact block listing -- metadata plus a short snippet, no full content."""
-    bbox_id  : str
-    label    : str
-    page_idx : int
-    bbox     : Optional[list]
-    score    : Optional[float]
-    snippet  : str
+    bbox_id   : str
+    label     : str
+    page_idx  : int
+    bbox      : Optional[list]
+    page_size : Optional[list]
+    norm_bbox : Optional[list]   # bbox as page-relative [0..1] fractions
+    score     : Optional[float]
+    snippet   : str
 
 
 @dataclass
@@ -63,6 +65,16 @@ class OutlineEntry:
 def _snippet(content: str, length: int = _SNIPPET_LEN) -> str:
     collapsed = " ".join(content.split())
     return collapsed if len(collapsed) <= length else collapsed[:length] + "..."
+
+
+def _norm_bbox(bbox: Optional[list], page_size: Optional[list]) -> Optional[list]:
+    # bbox [x0,y0,x1,y1] -> page-relative [0..1] fractions; None if either is missing.
+    if not bbox or not page_size:
+        return None
+    w, h = page_size
+    if not w or not h:
+        return None
+    return [round(bbox[0] / w, 3), round(bbox[1] / h, 3), round(bbox[2] / w, 3), round(bbox[3] / h, 3)]
 
 
 def _grep_snippet(content: str, start: int, end: int, window: int = 30) -> str:
@@ -121,6 +133,8 @@ class MinerUDocument:
                     label=r.label,
                     page_idx=r.page_idx,
                     bbox=r.bbox,
+                    page_size=r.page_size,
+                    norm_bbox=_norm_bbox(r.bbox, r.page_size),
                     score=r.score,
                     snippet=_snippet(r.content),
                 )
