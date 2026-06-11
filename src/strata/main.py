@@ -34,3 +34,7 @@ class Main:
 
     def doc(self, doc_id: str) -> MinerUDocument:
         return self._docs[doc_id]
+
+    def doc_summaries(self) -> list:
+        # Lightweight overview of open docs (id + counts, no content).
+        return [d.summary() for d in self._docs.values()]

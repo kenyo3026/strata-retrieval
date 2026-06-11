@@ -16,6 +16,14 @@ _SNIPPET_LEN = 80
 
 
 @dataclass
+class DocSummary:
+    """Lightweight per-document overview -- counts only, no block content."""
+    doc_id   : str
+    n_pages  : int
+    n_blocks : int
+
+
+@dataclass
 class BlockSummary:
     """Compact block listing -- metadata plus a short snippet, no full content."""
     bbox_id  : str
@@ -79,6 +87,13 @@ class MinerUDocument:
             if r.parent_bbox_id is not None:
                 self._by_parent[r.parent_bbox_id].append(r.bbox_id)
 
+    def summary(self) -> DocSummary:
+        return DocSummary(
+            doc_id=self.doc_id,
+            n_pages=len(self._by_page),
+            n_blocks=len(self.records),
+        )
+
     def read_block(self, bbox_id: str) -> ChunkRecord:
         return self._by_id[bbox_id]
 
@@ -112,12 +127,15 @@ class MinerUDocument:
             )
         return summaries
 
-    def grep(self, pattern: str, ignore_case: bool = False) -> list[GrepMatch]:
+    def grep(self, pattern: str, ignore_case: bool = False, limit: Optional[int] = None) -> list[GrepMatch]:
         # Regex search over block content (inline $latex$ is already spliced in).
         # One match (the first) per block; blocks with empty content are skipped.
+        # limit caps the number of matched blocks returned (None = all).
         regex = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
         matches = []
         for r in self.records:
+            if limit is not None and len(matches) >= limit:
+                break
             if not r.content:
                 continue
             m = regex.search(r.content)
