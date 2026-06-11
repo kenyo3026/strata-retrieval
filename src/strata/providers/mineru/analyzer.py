@@ -37,7 +37,15 @@ class MinerUArtifact(type(pathlib.Path())):
 
     @property
     def basename(self) -> str:
-        return getattr(self, "_basename", None) or self.parent.name
+        # Explicit hint wins; else self-describe from the `*_middle.json` filename
+        # (so a checkpoint's doc_id-named parent dir doesn't mislead us); else the
+        # parent dir name, MinerU's conventional `<basename>/auto` layout.
+        if getattr(self, "_basename", None):
+            return self._basename
+        middles = list(self.glob("*_middle.json"))
+        if middles:
+            return middles[0].name[: -len("_middle.json")]
+        return self.parent.name
 
     @property
     def middle_json(self) -> pathlib.Path:
