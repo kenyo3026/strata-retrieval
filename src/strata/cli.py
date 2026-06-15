@@ -45,6 +45,11 @@ def cmd_read_block(args) -> int:
     return 0
 
 
+def cmd_read_page(args) -> int:
+    _dump(_open(args.source).read_page(args.page_idx, embed_images=args.embed_images))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="strata", description="MinerU retrieval tools")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -63,6 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_read = subparsers.add_parser("read-block", parents=[source], help="Full content of one block")
     p_read.add_argument("bbox_id", help="Stable block id, e.g. p0_b6_s0_image_body")
     p_read.set_defaults(func=cmd_read_block)
+
+    p_page = subparsers.add_parser("read-page", parents=[source], help="Whole page as ordered regions")
+    p_page.add_argument("page_idx", type=int, help="0-based page index")
+    p_page.add_argument("--embed-images", action="store_true", help="Inline image bytes as base64 data uris")
+    p_page.set_defaults(func=cmd_read_page)
 
     return parser
 
