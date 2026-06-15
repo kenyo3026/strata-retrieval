@@ -13,7 +13,7 @@ from .providers.factory import ProviderType, get_analyzer
 from .providers.mineru.document import MinerUDocument
 from .utils.projects import find_project_root
 
-DEFAULT_CHECKPOINT_ROOT = find_project_root() / "checkpoint"
+DEFAULT_CHECKPOINT_ROOT = find_project_root() / ".strata" / "checkpoint"
 
 
 class Main:

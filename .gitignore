@@ -14,6 +14,7 @@ __pycache__
 *.ipynb
 
 # directories
+.strata/
 checkpoint/
 docs/
 scripts/
