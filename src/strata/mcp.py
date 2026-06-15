@@ -31,6 +31,13 @@ def create_mcp_server() -> FastMCP:
         except KeyError:
             raise ValueError(f"doc_id '{doc_id}' is not open")
 
+    def _resolve(bbox_id: str, thunk):
+        # Run a block-keyed lookup, turning an unknown bbox_id into a clear error.
+        try:
+            return _dump(thunk())
+        except KeyError:
+            raise ValueError(f"bbox_id '{bbox_id}' not found")
+
     @mcp.tool(name="open")
     def open_doc(source: str, doc_id: Optional[str] = None, provider: str = ProviderType.MINERU) -> dict:
         """Parse a document `auto` dir into a flat index; returns its doc_id."""
@@ -48,22 +55,59 @@ def create_mcp_server() -> FastMCP:
         return _dump(_doc(doc_id).outline())
 
     @mcp.tool
-    def grep(doc_id: str, pattern: str, ignore_case: bool = False) -> list:
+    def grep(doc_id: str, pattern: str, ignore_case: bool = False, limit: Optional[int] = None) -> list:
         """Regex/substring search over block content (inline LaTeX included)."""
-        return _dump(_doc(doc_id).grep(pattern, ignore_case=ignore_case))
+        return _dump(_doc(doc_id).grep(pattern, ignore_case=ignore_case, limit=limit))
+
+    @mcp.tool(name="list_docs")
+    def list_docs() -> list:
+        """Lightweight overview (id + counts) of every open document."""
+        return _dump(main.doc_summaries())
+
+    @mcp.tool
+    def list_blocks(doc_id: str, label: Optional[str] = None, page: Optional[int] = None) -> list:
+        """Compact block listing, optionally filtered by label and/or page index."""
+        return _dump(_doc(doc_id).list_blocks(label=label, page=page))
 
     @mcp.tool
     def read_block(doc_id: str, bbox_id: str) -> dict:
         """Full content of one block by bbox_id."""
-        try:
-            return _dump(_doc(doc_id).read_block(bbox_id))
-        except KeyError:
-            raise ValueError(f"bbox_id '{bbox_id}' not found")
+        return _resolve(bbox_id, lambda: _doc(doc_id).read_block(bbox_id))
 
     @mcp.tool
     def read_page(doc_id: str, page_idx: int, embed_images: bool = False) -> dict:
         """Whole page as ordered per-kind regions; embed_images inlines image bytes as data uris."""
         return _dump(_doc(doc_id).read_page(page_idx, embed_images=embed_images))
+
+    @mcp.tool
+    def page_info(doc_id: str, page_idx: int) -> dict:
+        """Page metadata: size, per-label counts, and block ids."""
+        return _dump(_doc(doc_id).page_info(page_idx))
+
+    @mcp.tool
+    def context(doc_id: str, bbox_id: str, n_prev: int = 1, n_next: int = 1) -> list:
+        """A block plus its n_prev/n_next reading-order neighbours."""
+        return _resolve(bbox_id, lambda: _doc(doc_id).read_block_with_context(bbox_id, n_prev=n_prev, n_next=n_next))
+
+    @mcp.tool
+    def parent(doc_id: str, bbox_id: str) -> Optional[str]:
+        """Composite parent id of a block, or null when it is top-level."""
+        return _resolve(bbox_id, lambda: _doc(doc_id).parent(bbox_id))
+
+    @mcp.tool
+    def siblings(doc_id: str, bbox_id: str) -> list:
+        """Co-members under the same composite block."""
+        return _resolve(bbox_id, lambda: _doc(doc_id).siblings(bbox_id))
+
+    @mcp.tool(name="next")
+    def next_block(doc_id: str, bbox_id: str) -> Optional[str]:
+        """The next block in reading order, or null at the end."""
+        return _resolve(bbox_id, lambda: _doc(doc_id).next(bbox_id))
+
+    @mcp.tool(name="prev")
+    def prev_block(doc_id: str, bbox_id: str) -> Optional[str]:
+        """The previous block in reading order, or null at the start."""
+        return _resolve(bbox_id, lambda: _doc(doc_id).prev(bbox_id))
 
     return mcp
 
