@@ -36,10 +36,42 @@ class BlockSummary:
     snippet   : str
 
 
+@dataclass(frozen=True)
+class RegionKind:
+    """The small closed vocabulary a page region collapses to (MinerU's open
+    `label` -> one of these), driving the per-kind delivery payload."""
+    TEXT     : str = "text"
+    EQUATION : str = "equation"
+    TABLE    : str = "table"
+    IMAGE    : str = "image"
+
+
+@dataclass
+class TextRegion:
+    """Any inline-string region (text / title / equation / table): the payload
+    lives in `content`, and `kind` says how to read it -- plain text (with inline
+    `$latex$` spliced in), `$$...$$` LaTeX, or an html table string."""
+    bbox_id : str
+    kind    : str
+    label   : str
+    bbox    : Optional[list]
+    content : Optional[str]
+
+
+@dataclass
+class ImageRegion:
+    """Image / chart as a zero-I/O placeholder: just the reference, no bytes."""
+    bbox_id    : str
+    kind       : str
+    label      : str
+    bbox       : Optional[list]
+    image_path : Optional[str]
+
+
 @dataclass
 class PagePayload:
     """A whole page as the delivery unit (rag-as-book): a page header plus its
-    regions in reading order. Per-kind region shaping is layered on separately."""
+    regions in reading order, each shaped per its kind."""
     doc_id    : str
     page_idx  : int
     page_size : Optional[list]
@@ -87,6 +119,29 @@ def _norm_bbox(bbox: Optional[list], page_size: Optional[list]) -> Optional[list
     return [round(bbox[0] / w, 3), round(bbox[1] / h, 3), round(bbox[2] / w, 3), round(bbox[3] / h, 3)]
 
 
+def _kind_of(record: ChunkRecord) -> str:
+    # Drive kind off the payload, not the label string: an interline equation is
+    # content; an html means table; else an image_path means image -- which also
+    # folds the "table misdetected as image, no html" case straight into image.
+    if "equation" in record.label:
+        return RegionKind.EQUATION
+    elif record.html:
+        return RegionKind.TABLE
+    elif record.image_path:
+        return RegionKind.IMAGE
+    return RegionKind.TEXT
+
+
+def _region(record: ChunkRecord):
+    # Shape a flat record into its per-kind delivery region (caption folding and
+    # image-byte embedding are layered on later).
+    kind = _kind_of(record)
+    if kind == RegionKind.IMAGE:
+        return ImageRegion(bbox_id=record.bbox_id, kind=kind, label=record.label, bbox=record.bbox, image_path=record.image_path)
+    content = record.html if kind == RegionKind.TABLE else record.content
+    return TextRegion(bbox_id=record.bbox_id, kind=kind, label=record.label, bbox=record.bbox, content=content)
+
+
 def _grep_snippet(content: str, start: int, end: int, window: int = 30) -> str:
     lo = max(0, start - window)
     hi = min(len(content), end + window)
@@ -127,7 +182,7 @@ class MinerUDocument:
             doc_id=self.doc_id,
             page_idx=page_idx,
             page_size=records[0].page_size if records else None,
-            regions=list(records),
+            regions=[_region(r) for r in records],
         )
 
     def read_block_with_context(self, bbox_id: str, n_prev: int = 1, n_next: int = 1) -> list[ChunkRecord]:
