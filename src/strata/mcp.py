@@ -60,6 +60,11 @@ def create_mcp_server() -> FastMCP:
         except KeyError:
             raise ValueError(f"bbox_id '{bbox_id}' not found")
 
+    @mcp.tool
+    def read_page(doc_id: str, page_idx: int, embed_images: bool = False) -> dict:
+        """Whole page as ordered per-kind regions; embed_images inlines image bytes as data uris."""
+        return _dump(_doc(doc_id).read_page(page_idx, embed_images=embed_images))
+
     return mcp
 
 
