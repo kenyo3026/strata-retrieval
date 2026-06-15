@@ -60,12 +60,15 @@ class TextRegion:
 
 @dataclass
 class ImageRegion:
-    """Image / chart as a zero-I/O placeholder: just the reference, no bytes."""
+    """Image / chart as a zero-I/O placeholder: the reference plus its caption
+    (folded in from a sibling SubBlock), no bytes. The caption lets an LLM decide
+    whether to fetch the image without blindly loading it."""
     bbox_id    : str
     kind       : str
     label      : str
     bbox       : Optional[list]
     image_path : Optional[str]
+    caption    : Optional[str] = None
 
 
 @dataclass
@@ -132,14 +135,34 @@ def _kind_of(record: ChunkRecord) -> str:
     return RegionKind.TEXT
 
 
-def _region(record: ChunkRecord):
-    # Shape a flat record into its per-kind delivery region (caption folding and
-    # image-byte embedding are layered on later).
+def _region(record: ChunkRecord, caption: Optional[str] = None):
+    # Shape a flat record into its per-kind delivery region. caption is folded in
+    # from a sibling SubBlock for image/chart (image-byte embedding comes later).
     kind = _kind_of(record)
     if kind == RegionKind.IMAGE:
-        return ImageRegion(bbox_id=record.bbox_id, kind=kind, label=record.label, bbox=record.bbox, image_path=record.image_path)
+        return ImageRegion(bbox_id=record.bbox_id, kind=kind, label=record.label, bbox=record.bbox, image_path=record.image_path, caption=caption)
     content = record.html if kind == RegionKind.TABLE else record.content
     return TextRegion(bbox_id=record.bbox_id, kind=kind, label=record.label, bbox=record.bbox, content=content)
+
+
+def _assemble_regions(records: list) -> list:
+    # Build a page's regions, folding each image/chart's sibling caption(s) into
+    # the image region (same composite parent) and dropping them as standalone.
+    siblings = defaultdict(list)
+    for r in records:
+        siblings[r.parent_bbox_id].append(r)
+
+    folded = {}      # image bbox_id -> joined caption text
+    consumed = set()  # caption bbox_ids folded away, so they aren't re-emitted
+    for r in records:
+        if _kind_of(r) != RegionKind.IMAGE or r.parent_bbox_id is None:
+            continue
+        caps = [s for s in siblings[r.parent_bbox_id] if "caption" in s.label and s.content]
+        if caps:
+            folded[r.bbox_id] = " ".join(s.content for s in caps)
+            consumed.update(s.bbox_id for s in caps)
+
+    return [_region(r, caption=folded.get(r.bbox_id)) for r in records if r.bbox_id not in consumed]
 
 
 def _grep_snippet(content: str, start: int, end: int, window: int = 30) -> str:
@@ -182,7 +205,7 @@ class MinerUDocument:
             doc_id=self.doc_id,
             page_idx=page_idx,
             page_size=records[0].page_size if records else None,
-            regions=[_region(r) for r in records],
+            regions=_assemble_regions(records),
         )
 
     def read_block_with_context(self, bbox_id: str, n_prev: int = 1, n_next: int = 1) -> list[ChunkRecord]:
