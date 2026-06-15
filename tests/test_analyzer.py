@@ -8,14 +8,14 @@ Tests cover:
   deterministic bbox_ids and parent grouping
 
 Usage:
-    pytest src/strata/tests/test_analyzer.py -v
+    pytest tests/test_analyzer.py -v
 """
 
 import sys
 from pathlib import Path
 
 # Resolve `strata` whether run via pytest or as a standalone module.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from strata.providers.mineru.analyzer import MinerUAnalyzer, MinerUArtifact
 from strata.providers.mineru.chunk import ChunkRecord

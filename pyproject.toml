@@ -52,7 +52,7 @@ where = ["src"]
 "" = "src"
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "src"]
+testpaths = ["tests"]
 pythonpath = ["src"]
 python_files = ["test_*.py", "*_test.py"]
 python_functions = ["test_*"]

@@ -63,5 +63,8 @@ def sample_auto_dir():
     auto = tmp / doc_name / "auto"
     auto.mkdir(parents=True)
     (auto / f"{doc_name}_middle.json").write_text(json.dumps(_MIDDLE), encoding="utf-8")
+    images = auto / "images"
+    images.mkdir()
+    (images / "img0.jpg").write_bytes(b"\xff\xd8\xff\xe0stub-jpeg")  # for embed_images
     yield auto
     shutil.rmtree(tmp, ignore_errors=True)
