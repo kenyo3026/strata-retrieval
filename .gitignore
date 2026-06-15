@@ -15,6 +15,7 @@ __pycache__
 
 # directories
 checkpoint/
+docs/
 scripts/
 
 # Python package development
