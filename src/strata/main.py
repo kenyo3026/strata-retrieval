@@ -11,14 +11,18 @@ from typing import Optional, Union
 from .checkpoint import Checkpoint
 from .providers.factory import ProviderType, get_analyzer
 from .providers.mineru.document import MinerUDocument
+from .utils.projects import find_project_root
+
+DEFAULT_CHECKPOINT_ROOT = find_project_root() / "checkpoint"
 
 
 class Main:
-    def __init__(self, checkpoint_root: Optional[Union[str, pathlib.Path]] = None):
+    def __init__(self, checkpoint_root: Union[str, pathlib.Path] = DEFAULT_CHECKPOINT_ROOT):
+        # The checkpoint store is the single artifact home: every doc is parsed from
+        # its copy under the root, and an existing root is inherited on startup.
         self._docs: dict[str, MinerUDocument] = {}
-        self._store = Checkpoint.new(checkpoint_root) if checkpoint_root else None
-        if self._store is not None:
-            self._restore()
+        self._store = Checkpoint.new(checkpoint_root)
+        self._restore()
 
     def open(
         self,
@@ -26,24 +30,25 @@ class Main:
         doc_id: Optional[str] = None,
         provider: str = ProviderType.MINERU,
     ) -> str:
-        """Parse a document dir into a flat index and cache it. Returns doc_id."""
-        resolved_id = self._load(doc_path, doc_id, provider)
-        if self._store is not None:
-            self._store.doc(resolved_id).save(doc_path, doc_id=resolved_id, provider=provider)
+        """Back the artifact up under the checkpoint, then parse from that copy.
+
+        Returns the doc_id. Re-opening the same id re-backs-up and re-parses.
+        """
+        resolved_id = doc_id or get_analyzer(provider)(doc_path).default_doc_id
+        ckpt = self._store.doc(resolved_id).save(doc_path, doc_id=resolved_id, provider=provider)
+        self._load(ckpt.artifact, resolved_id, provider)
         return resolved_id
 
     def _load(
         self,
-        doc_path: Union[str, pathlib.Path],
-        doc_id: Optional[str],
+        artifact: Union[str, pathlib.Path],
+        doc_id: str,
         provider: str,
-    ) -> str:
-        # Parse + cache into memory only -- no persistence (restore reuses this).
-        analyzer = get_analyzer(provider)(doc_path)
-        resolved_id = doc_id or analyzer.default_doc_id
-        records = analyzer.analyze(resolved_id)
-        self._docs[resolved_id] = MinerUDocument(resolved_id, records)
-        return resolved_id
+    ) -> None:
+        # Parse a checkpoint artifact into an in-memory index, cached under doc_id.
+        # Shared by open (fresh backup) and restore (existing backup).
+        records = get_analyzer(provider)(artifact).analyze(doc_id)
+        self._docs[doc_id] = MinerUDocument(doc_id, records)
 
     def _restore(self) -> None:
         # Re-open every doc already backed up under the checkpoint root.

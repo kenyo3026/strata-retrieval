@@ -18,12 +18,8 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from .main import Main
+from .main import DEFAULT_CHECKPOINT_ROOT, Main
 from .providers.factory import ProviderType
-from .utils.projects import find_project_root
-
-
-DEFAULT_CHECKPOINT_ROOT = str(find_project_root() / "checkpoint")
 
 class OpenRequest(BaseModel):
     source: str
@@ -39,7 +35,7 @@ def _dump(result):
 
 def create_app(sources: Optional[list[str]] = None, checkpoint_root: Optional[str] = None) -> FastAPI:
     app = FastAPI(title="strata-retrieval", version="0.1.0")
-    main = Main(checkpoint_root=checkpoint_root)
+    main = Main(checkpoint_root=checkpoint_root) if checkpoint_root else Main()
 
     def _doc(doc_id: str):
         try:
@@ -136,7 +132,7 @@ def main() -> int:
         "--checkpoint",
         metavar="DIR",
         help="Persist opened docs here; reuse the same dir to inherit them on restart.",
-        default=DEFAULT_CHECKPOINT_ROOT,
+        default=str(DEFAULT_CHECKPOINT_ROOT),
     )
     args = parser.parse_args()
 
