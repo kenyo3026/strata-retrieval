@@ -105,8 +105,8 @@ def create_app(sources: Optional[list[str]] = None, checkpoint_root: Optional[st
         return _resolve(bbox_id, lambda: _doc(doc_id).prev(bbox_id))
 
     @app.get("/docs/{doc_id}/pages/{page_idx}")
-    def read_page(doc_id: str, page_idx: int):
-        return _dump(_doc(doc_id).read_page(page_idx))
+    def read_page(doc_id: str, page_idx: int, embed_images: bool = False):
+        return _dump(_doc(doc_id).read_page(page_idx, embed_images=embed_images))
 
     @app.get("/docs/{doc_id}/pages/{page_idx}/info")
     def page_info(doc_id: str, page_idx: int):

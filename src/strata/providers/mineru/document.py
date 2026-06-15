@@ -5,10 +5,13 @@ operations (PRP section 4.3). Returns rich typed results -- serialization to
 dict / JSON / image-content is left to the interface adapters (cli/api/mcp).
 """
 
+import base64
+import mimetypes
+import pathlib
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, replace
+from typing import Optional, Union
 
 from .chunk import ChunkRecord
 
@@ -69,6 +72,7 @@ class ImageRegion:
     bbox       : Optional[list]
     image_path : Optional[str]
     caption    : Optional[str] = None
+    content    : Optional[str] = None   # base64 data uri when embed_images=True
 
 
 @dataclass
@@ -174,9 +178,10 @@ def _grep_snippet(content: str, start: int, end: int, window: int = 30) -> str:
 
 
 class MinerUDocument:
-    def __init__(self, doc_id: str, records: list[ChunkRecord]):
+    def __init__(self, doc_id: str, records: list[ChunkRecord], artifact_root: Union[str, pathlib.Path]):
         self.doc_id = doc_id
         self.records = records
+        self.artifact_root = pathlib.Path(artifact_root)   # resolves image_path for embedding
         self._by_id = {r.bbox_id: r for r in records}
         self._by_page = defaultdict(list)
         self._by_parent = defaultdict(list)   # composite bbox_id -> child SubBlock ids
@@ -197,16 +202,29 @@ class MinerUDocument:
     def read_block(self, bbox_id: str) -> ChunkRecord:
         return self._by_id[bbox_id]
 
-    def read_page(self, page_idx: int) -> PagePayload:
-        # The whole page as one delivery unit: page header + regions in reading
-        # order (insertion order is doc order). Regions are the raw records for now.
+    def read_page(self, page_idx: int, embed_images: bool = False) -> PagePayload:
+        # The whole page as one delivery unit: page header + per-kind regions in
+        # reading order. With embed_images, image regions also inline the image
+        # bytes as a base64 data uri; otherwise they stay a zero-I/O reference.
         records = self._by_page.get(page_idx, [])
+        regions = _assemble_regions(records)
+        if embed_images:
+            regions = [self._embed(r) if isinstance(r, ImageRegion) else r for r in regions]
         return PagePayload(
             doc_id=self.doc_id,
             page_idx=page_idx,
             page_size=records[0].page_size if records else None,
-            regions=_assemble_regions(records),
+            regions=regions,
         )
+
+    def _embed(self, region: ImageRegion) -> ImageRegion:
+        # Load the referenced image off the artifact and inline it as a data uri.
+        if not region.image_path:
+            return region
+        path = self.artifact_root / "images" / pathlib.Path(region.image_path).name
+        mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+        data = base64.b64encode(path.read_bytes()).decode("ascii")
+        return replace(region, content=f"data:{mime};base64,{data}")
 
     def read_block_with_context(self, bbox_id: str, n_prev: int = 1, n_next: int = 1) -> list[ChunkRecord]:
         # The block plus its n_prev/n_next reading-order neighbours, in order.
