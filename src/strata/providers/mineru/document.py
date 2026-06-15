@@ -37,6 +37,16 @@ class BlockSummary:
 
 
 @dataclass
+class PagePayload:
+    """A whole page as the delivery unit (rag-as-book): a page header plus its
+    regions in reading order. Per-kind region shaping is layered on separately."""
+    doc_id    : str
+    page_idx  : int
+    page_size : Optional[list]
+    regions   : list
+
+
+@dataclass
 class PageInfo:
     page_idx        : int
     page_size       : Optional[list]
@@ -109,9 +119,16 @@ class MinerUDocument:
     def read_block(self, bbox_id: str) -> ChunkRecord:
         return self._by_id[bbox_id]
 
-    def read_page(self, page_idx: int) -> list[ChunkRecord]:
-        # Full records for the page, in reading order (insertion order is doc order).
-        return list(self._by_page.get(page_idx, []))
+    def read_page(self, page_idx: int) -> PagePayload:
+        # The whole page as one delivery unit: page header + regions in reading
+        # order (insertion order is doc order). Regions are the raw records for now.
+        records = self._by_page.get(page_idx, [])
+        return PagePayload(
+            doc_id=self.doc_id,
+            page_idx=page_idx,
+            page_size=records[0].page_size if records else None,
+            regions=list(records),
+        )
 
     def read_block_with_context(self, bbox_id: str, n_prev: int = 1, n_next: int = 1) -> list[ChunkRecord]:
         # The block plus its n_prev/n_next reading-order neighbours, in order.
