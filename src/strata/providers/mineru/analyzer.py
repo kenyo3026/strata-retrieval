@@ -6,27 +6,6 @@ from .chunk import ChunkRecord, flatten
 from .middle import MiddleJson
 
 
-# @dataclass
-# class MinerUArtifact:
-#     root: pathlib.Path
-#     name : str
-
-#     @classmethod
-#     def from_dir(cls, path: pathlib.Path, name: Optional[str] = None) -> "MinerUArtifact":
-#         return cls(root=path, name=name or path.parent.name)
-
-#     @property
-#     def middle_json(self) -> pathlib.Path:
-#         return self.root / f"{self.name}_middle.json"
-
-#     @property
-#     def content_list_json(self) -> pathlib.Path:
-#         return self.root / f"{self.name}_content_list.json"
-
-#     @property
-#     def images(self) -> list[pathlib.Path]:
-#         return sorted((self.root / "images").glob("*.jpg"))
-
 class MinerUArtifact(type(pathlib.Path())):
 
     @classmethod
