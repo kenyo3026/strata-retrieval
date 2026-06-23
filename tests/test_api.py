@@ -2,7 +2,7 @@
 
 Drives every retrieval route in-process against `sample_auto_dir`, so this is
 also the executable mirror of tests/manual/mcp_coverage.md: the adapters are thin
-wrappers over the same MinerUDocument, so green here means the tool surface works.
+wrappers over the same Document, so green here means the tool surface works.
 """
 
 import pytest

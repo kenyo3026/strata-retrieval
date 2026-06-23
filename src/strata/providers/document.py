@@ -13,7 +13,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from typing import Optional, Union
 
-from .chunk import ChunkRecord
+from .mineru.chunk import ChunkRecord
 
 _SNIPPET_LEN = 80
 
@@ -177,7 +177,7 @@ def _grep_snippet(content: str, start: int, end: int, window: int = 30) -> str:
     return prefix + " ".join(content[lo:hi].split()) + suffix
 
 
-class MinerUDocument:
+class Document:
     def __init__(self, doc_id: str, records: list[ChunkRecord], artifact_root: Union[str, pathlib.Path]):
         self.doc_id = doc_id
         self.records = records

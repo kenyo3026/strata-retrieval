@@ -22,7 +22,7 @@ from mcp.types import ImageContent, TextContent
 
 from .main import Main
 from .providers.factory import ProviderType
-from .providers.mineru.document import RegionKind
+from .providers.document import RegionKind
 
 
 def _dump(result):

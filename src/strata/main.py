@@ -2,7 +2,7 @@
 
 Thin façade: manages document handles (parse + cache an index per doc) and
 provider selection. The retrieval tools themselves live on the per-document core
-(MinerUDocument); Main only owns lifecycle. The cli/api/mcp adapters wrap Main.
+(Document); Main only owns lifecycle. The cli/api/mcp adapters wrap Main.
 """
 
 import pathlib
@@ -10,7 +10,7 @@ from typing import Optional, Union
 
 from .checkpoint import Checkpoint
 from .providers.factory import ProviderType, get_analyzer
-from .providers.mineru.document import MinerUDocument
+from .providers.document import Document
 from .utils.projects import find_project_root
 
 DEFAULT_CHECKPOINT_ROOT = find_project_root() / ".strata" / "checkpoint"
@@ -20,7 +20,7 @@ class Main:
     def __init__(self, checkpoint_root: Union[str, pathlib.Path] = DEFAULT_CHECKPOINT_ROOT):
         # The checkpoint store is the single artifact home: every doc is parsed from
         # its copy under the root, and an existing root is inherited on startup.
-        self._docs: dict[str, MinerUDocument] = {}
+        self._docs: dict[str, Document] = {}
         self._store = Checkpoint.new(checkpoint_root)
         self._restore()
 
@@ -48,7 +48,7 @@ class Main:
         # Parse a checkpoint artifact into an in-memory index, cached under doc_id.
         # Shared by open (fresh backup) and restore (existing backup).
         records = get_analyzer(provider)(artifact).analyze(doc_id)
-        self._docs[doc_id] = MinerUDocument(doc_id, records, artifact_root=artifact)
+        self._docs[doc_id] = Document(doc_id, records, artifact_root=artifact)
 
     def _restore(self) -> None:
         # Re-open every doc already backed up under the checkpoint root.
@@ -59,7 +59,7 @@ class Main:
     def close(self, doc_id: str) -> None:
         self._docs.pop(doc_id, None)
 
-    def doc(self, doc_id: str) -> MinerUDocument:
+    def doc(self, doc_id: str) -> Document:
         return self._docs[doc_id]
 
     def doc_summaries(self) -> list:
