@@ -178,12 +178,12 @@ def _grep_snippet(content: str, start: int, end: int, window: int = 30) -> str:
 
 
 class Document:
-    def __init__(self, records: list[ChunkRecord], artifact_root: Union[str, pathlib.Path], doc_id: Optional[str] = None):
+    def __init__(self, records: list[ChunkRecord], doc_id: Optional[str] = None, artifact_root: Optional[Union[str, pathlib.Path]] = None):
         # doc_id is self-described by the records (flatten stamps it on each); accept
         # an override, else read it back rather than make the caller restate it.
         self.doc_id = doc_id if doc_id is not None else (records[0].doc_id if records else None)
         self.records = records
-        self.artifact_root = pathlib.Path(artifact_root)   # resolves image_path for embedding
+        self.artifact_root = pathlib.Path(artifact_root) if artifact_root else None  # resolves image_path for embedding
         self._by_id = {r.bbox_id: r for r in self.records}
         self._by_page = defaultdict(list)
         self._by_parent = defaultdict(list)   # composite bbox_id -> child SubBlock ids
@@ -208,6 +208,8 @@ class Document:
         # The whole page as one delivery unit: page header + per-kind regions in
         # reading order. With embed_images, image regions also inline the image
         # bytes as a base64 data uri; otherwise they stay a zero-I/O reference.
+        if embed_images and self.artifact_root is None:
+            raise ValueError("read_page(embed_images=True) requires the document to be opened with an artifact_root")
         records = self._by_page.get(page_idx, [])
         regions = _assemble_regions(records)
         if embed_images:
