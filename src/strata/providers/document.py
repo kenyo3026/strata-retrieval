@@ -13,7 +13,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from typing import Optional, Union
 
-from .mineru.chunk import ChunkRecord
+from .record import ChunkRecord
 
 _SNIPPET_LEN = 80
 
@@ -182,11 +182,11 @@ class Document:
         self.doc_id = doc_id
         self.records = records
         self.artifact_root = pathlib.Path(artifact_root)   # resolves image_path for embedding
-        self._by_id = {r.bbox_id: r for r in records}
+        self._by_id = {r.bbox_id: r for r in self.records}
         self._by_page = defaultdict(list)
         self._by_parent = defaultdict(list)   # composite bbox_id -> child SubBlock ids
         self._position = {}                    # bbox_id -> index in reading order
-        for i, r in enumerate(records):
+        for i, r in enumerate(self.records):
             self._by_page[r.page_idx].append(r)
             self._position[r.bbox_id] = i
             if r.parent_bbox_id is not None:

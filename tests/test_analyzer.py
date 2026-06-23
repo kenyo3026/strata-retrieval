@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from strata.providers.mineru.analyzer import MinerUAnalyzer, MinerUArtifact
-from strata.providers.mineru.chunk import ChunkRecord
+from strata.providers.record import ChunkRecord
 
 
 class TestMinerUAnalyzer:

@@ -8,9 +8,8 @@ PRP 5.1) and content_md are deferred until a real need appears.
 """
 
 import re
-from dataclasses import dataclass
-from typing import Optional
 
+from ..record import ChunkRecord
 from .ids import composite_bbox_id, subblock_bbox_id
 from .middle import MiddleJson, SubBlock
 
@@ -27,29 +26,6 @@ IMAGE_SPANS = ("image", "chart", "seal")
 # A block containing any of these joins its span fragments tight; otherwise the
 # fragments join with a single space.
 _CJK_RE = re.compile("[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]")
-
-
-@dataclass
-class ChunkRecord:
-    doc_id           : str
-    bbox_id          : str
-    parent_bbox_id   : Optional[str]  # composite block; None when SubBlock is top-level
-    page_idx         : int
-    page_size        : Optional[list]
-    bbox             : Optional[list]
-    label            : str             # SubBlock role
-    composite_label  : str             # parent Composite type
-    reading_order    : Optional[int]   # block-level reading order
-    score            : Optional[float]
-    content          : str             # span text with inline $latex$ spliced in
-    html             : Optional[str]   # table_body only
-    image_path       : Optional[str]   # image/chart/seal/interline body only
-    inline_equations : list            # inline formula LaTeX strings
-    has_equation     : bool
-    has_image        : bool
-    level            : Optional[int]  = None  # heading level, titles only
-    from_discarded   : bool = False
-    sub_chunks       : Optional[list] = None
 
 
 def _extract_payload(sub_block: SubBlock):

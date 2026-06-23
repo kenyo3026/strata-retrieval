@@ -9,7 +9,7 @@ import json
 import pathlib
 from dataclasses import asdict
 
-from .chunk import ChunkRecord
+from .record import ChunkRecord
 
 
 def write_jsonl(records: list[ChunkRecord], path: pathlib.Path) -> None:

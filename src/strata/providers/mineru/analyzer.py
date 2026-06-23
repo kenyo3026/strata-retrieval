@@ -2,7 +2,8 @@ import pathlib
 from typing import Optional
 
 from ..base import DocAnalyzer
-from .chunk import ChunkRecord, flatten
+from ..record import ChunkRecord
+from .chunk import flatten
 from .middle import MiddleJson
 
 
