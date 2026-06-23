@@ -48,7 +48,7 @@ class Main:
         # Parse a checkpoint artifact into an in-memory index, cached under doc_id.
         # Shared by open (fresh backup) and restore (existing backup).
         records = get_analyzer(provider)(artifact).analyze(doc_id)
-        self._docs[doc_id] = Document(doc_id, records, artifact_root=artifact)
+        self._docs[doc_id] = Document(records, artifact_root=artifact)
 
     def _restore(self) -> None:
         # Re-open every doc already backed up under the checkpoint root.

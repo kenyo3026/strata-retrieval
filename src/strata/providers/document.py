@@ -21,7 +21,7 @@ _SNIPPET_LEN = 80
 @dataclass
 class DocSummary:
     """Lightweight per-document overview -- counts only, no block content."""
-    doc_id   : str
+    doc_id   : Optional[str]
     n_pages  : int
     n_blocks : int
 
@@ -79,7 +79,7 @@ class ImageRegion:
 class PagePayload:
     """A whole page as the delivery unit (rag-as-book): a page header plus its
     regions in reading order, each shaped per its kind."""
-    doc_id    : str
+    doc_id    : Optional[str]
     page_idx  : int
     page_size : Optional[list]
     regions   : list
@@ -178,8 +178,10 @@ def _grep_snippet(content: str, start: int, end: int, window: int = 30) -> str:
 
 
 class Document:
-    def __init__(self, doc_id: str, records: list[ChunkRecord], artifact_root: Union[str, pathlib.Path]):
-        self.doc_id = doc_id
+    def __init__(self, records: list[ChunkRecord], artifact_root: Union[str, pathlib.Path], doc_id: Optional[str] = None):
+        # doc_id is self-described by the records (flatten stamps it on each); accept
+        # an override, else read it back rather than make the caller restate it.
+        self.doc_id = doc_id if doc_id is not None else (records[0].doc_id if records else None)
         self.records = records
         self.artifact_root = pathlib.Path(artifact_root)   # resolves image_path for embedding
         self._by_id = {r.bbox_id: r for r in self.records}
