@@ -153,7 +153,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except KeyError as e:
+        # Core addresses blocks by bbox_id; a miss surfaces as a bare KeyError.
+        print(f"error: bbox_id {e} not found", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
