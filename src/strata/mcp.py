@@ -16,6 +16,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Optional
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
 from mcp.types import ImageContent, TextContent
 
@@ -46,14 +47,14 @@ def create_mcp_server() -> FastMCP:
         try:
             return main.doc(doc_id)
         except KeyError:
-            raise ValueError(f"doc_id '{doc_id}' is not open")
+            raise ToolError(f"doc_id '{doc_id}' is not open")
 
     def _resolve(bbox_id: str, thunk):
         # Run a block-keyed lookup, turning an unknown bbox_id into a clear error.
         try:
             return _dump(thunk())
         except KeyError:
-            raise ValueError(f"bbox_id '{bbox_id}' not found")
+            raise ToolError(f"bbox_id '{bbox_id}' not found")
 
     @mcp.tool(name="open")
     def open_doc(source: str, doc_id: Optional[str] = None, provider: str = ProviderType.MINERU) -> ToolResult:
