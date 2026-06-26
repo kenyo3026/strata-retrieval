@@ -55,6 +55,7 @@ def _draw_count(total: int, k: Optional[int], fraction: Optional[float], capped:
 
 
 class Sampler:
+
     def __init__(self, records: list[ChunkRecord], doc_id: Optional[str] = None):
         # doc_id is self-described by the records (flatten stamps it on each); accept
         # an override, else read it back rather than make the caller restate it.
@@ -102,3 +103,13 @@ class Sampler:
                 continue
             drawn.extend(rng.choices(pool, k=_draw_count(len(pool), k, fraction, capped=False)))
         return drawn
+
+    PAGE_BASED_SAMPLING = {
+        sample_pages,
+        sample_pages_with_replacement,
+    }
+
+    CHUNK_BASED_SAMPLING = {
+        sample_chunks,
+        sample_chunks_with_replacement,
+    }

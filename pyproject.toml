@@ -34,6 +34,12 @@ api = [
 mcp = [
     "fastmcp>=2.0.0",
 ]
+synthesis = [
+    "instructor>=1.0.0",
+    "litellm>=1.0.0",
+    "config-morpher @ git+https://github.com/kenyo3026/configmorpher.git@v0.1.2",
+    "pydantic>=2.0.0",
+]
 dev = [
     "pytest>=7.0.0",
     "ipykernel>=6.0.0",
@@ -44,6 +50,7 @@ dev = [
 strata = "strata.cli:main"
 strata-api = "strata.app:main"
 strata-mcp = "strata.mcp:main"
+strata-synthesis = "strata.synthesis:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
