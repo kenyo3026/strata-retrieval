@@ -30,7 +30,7 @@ import re
 import sys
 from dataclasses import dataclass, field, fields
 from datetime import datetime
-from typing import Callable, Optional, Union
+from typing import Callable, Literal, Optional, Union
 
 import instructor
 import litellm
@@ -69,9 +69,10 @@ class SynthesisConfig:
     qualifier_model: str
     sampler: str
     sampling_kwargs: dict = field(default_factory = dict)
-    custom_instruction: Optional[str] = None   # per-run generation refinement; None omits the block
+    custom_instruction: Optional[str] = None   # per-run synthesis refinement; None omits the block
     answer_overlap: Optional[float] = 0.6   # 3a threshold; None disables the check
     bare_overlap: Optional[float] = 0.6     # 3b threshold; None disables the check (and its LLM call)
+    min_signal: Optional[str] = None   # drop units the synthesizer rates below this signal; None keeps all
     cap: Optional[int] = None   # hard ceiling on qualified survivors; stop early once hit
 
     def setup_models(self, models:dict):
@@ -90,11 +91,13 @@ class SynthesisConfig:
 @dataclass
 class QAItem:
     """One synthesized QA anchored to the records of its source unit. `source_ids` are
-    the bbox_ids of every record that fed generation -- the by-construction retrieval
+    the bbox_ids of every record that fed synthesis -- the by-construction retrieval
     ground truth: one id for a chunk unit, the whole span for a page / section unit.
-    The two verdicts are step-3 qualification results, kept for auditability."""
+    `signal` is the synthesizer's pre-QA rating of the source unit's worth; the two
+    verdicts are step-3 qualification results. All three are kept for auditability."""
     question               : str
     answer                 : str
+    signal                 : str                     # synthesizer's low/high rating of the source unit
     source_ids             : list
     doc_id                 : Optional[str]
     answer_in_chunk        : Optional[bool] = None   # 3a: answer located in the unit
@@ -104,9 +107,12 @@ class QAItem:
 # instructor's structured-output target -- the only pydantic surface. Converted to
 # QAItem at the boundary; pydantic never leaves this module. Deliberately has no
 # docstring or field descriptions: instructor serializes both into the schema it sends
-# the LLM, so they would leak into the prompt. All generation guidance lives in the
-# instruction template (see .prompts), keeping this class a pure output shape.
+# the LLM, so they would leak into the prompt. All synthesis guidance lives in the
+# instruction template (see .prompts), keeping this class a pure output shape. `signal`
+# is first so the model rates the source unit before committing to a question -- the
+# field order is a lightweight gate, not post-hoc labelling.
 class _QAResponse(BaseModel):
+    signal   : Literal["low", "high"]
     question : str
     answer   : str
 
@@ -118,7 +124,7 @@ def _build_qa_messages(passage: str, custom_instruction: Optional[str] = None) -
     block = CUSTOM_INSTRUCTIONS_BLOCK.format(custom_instruction=custom_instruction.strip()) if custom_instruction else ""
     return [
         {"role": "system", "content": INSTRUCTION_FOR_QA_SYNTHESIS.format(custom_instructions=block)},
-        {"role": "user", "content": f"Passage:\n{passage}\n\nWrite one question and its answer."},
+        {"role": "user", "content": f"Passage:\n{passage}\n\nRate the passage's signal, then write one question and its answer."},
     ]
 
 
@@ -154,10 +160,17 @@ _BARE_SYSTEM = (
 )
 
 
-def _is_qualified(item: QAItem) -> bool:
-    # An item survives when no *enabled* check vetoes it: 3a must pass (answer in unit)
-    # and 3b must not (answerable without the doc). A disabled check leaves its verdict
-    # None, which abstains rather than vetoes -- so with both checks off every item passes.
+# Ordinal ranks for the synthesizer's source-unit rating, so min_signal can compare.
+_SIGNAL_RANK = {"low": 0, "high": 1}
+
+
+def _is_qualified(item: QAItem, min_signal: Optional[str] = None) -> bool:
+    # An item survives when no *enabled* check vetoes it: its signal must reach min_signal
+    # (None disables the gate), 3a must pass (answer in unit), and 3b must not (answerable
+    # without the doc). A disabled overlap check leaves its verdict None, which abstains
+    # rather than vetoes -- so with min_signal None and both overlaps off every item passes.
+    if min_signal is not None and _SIGNAL_RANK[item.signal] < _SIGNAL_RANK[min_signal]:
+        return False
     return (item.answer_in_chunk is None or item.answer_in_chunk) \
         and (item.answerable_without_doc is None or not item.answerable_without_doc)
 
@@ -177,6 +190,7 @@ class Synthesizer:
         qualifier_kwargs:dict={},
         answer_overlap: Optional[float] = 0.6,
         bare_overlap: Optional[float] = 0.6,
+        min_signal: Optional[str] = None,
         custom_instruction: Optional[str] = None,
         on_step: Optional[Callable[[QAItem], None]] = None,
         concurrency: int = 8,
@@ -215,7 +229,7 @@ class Synthesizer:
         try:
             for future in asyncio.as_completed(tasks):
                 item = await future
-                if _is_qualified(item):
+                if _is_qualified(item, min_signal):
                     kept.append(item)
                 if on_step is not None:
                     on_step(item)
@@ -238,6 +252,7 @@ class Synthesizer:
         return QAItem(
             question=resp.question,
             answer=resp.answer,
+            signal=resp.signal,
             source_ids=[r.bbox_id for r in unit.records],
             doc_id=unit.records[0].doc_id,
         )
@@ -454,10 +469,10 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
             # keep one writer. run calls it synchronously with no await between, so even
             # under concurrent records it never interleaves -- no lock needed. Both lists
             # are in completion order.
-            def on_step(item: QAItem, task=task, seen=seen) -> None:
+            def on_step(item: QAItem, task=task, seen=seen, min_signal=syn_config.min_signal) -> None:
                 raw.append(item)
                 artifact.write_dataset_raw(raw)
-                if _is_qualified(item):
+                if _is_qualified(item, min_signal):
                     seen["kept"] += 1
                     qa.append(item)
                     artifact.write_dataset(qa)
@@ -470,6 +485,7 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
                 syn_config.qualifier_model,
                 answer_overlap=syn_config.answer_overlap,
                 bare_overlap=syn_config.bare_overlap,
+                min_signal=syn_config.min_signal,
                 custom_instruction=syn_config.custom_instruction,
                 on_step=on_step,
                 concurrency=args.concurrency,
