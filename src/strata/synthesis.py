@@ -30,7 +30,7 @@ import re
 import sys
 from dataclasses import dataclass, field, fields
 from datetime import datetime
-from typing import Callable, ClassVar, Optional, Union
+from typing import Callable, Optional, Union
 
 import instructor
 import litellm
@@ -47,6 +47,7 @@ from rich.progress import (
 )
 
 from .main import DEFAULT_CHECKPOINT_ROOT, Main
+from .prompts import CUSTOM_INSTRUCTIONS_BLOCK, INSTRUCTION_FOR_QA_SYNTHESIS
 from .providers.record import ChunkRecord
 from .providers.sampler import Sampler, Unit
 from .utils.mixin import NameWithLazyDatetime
@@ -68,6 +69,9 @@ class SynthesisConfig:
     qualifier_model: str
     sampler: str
     sampling_kwargs: dict = field(default_factory = dict)
+    custom_instruction: Optional[str] = None   # per-run generation refinement; None omits the block
+    answer_overlap: Optional[float] = 0.6   # 3a threshold; None disables the check
+    bare_overlap: Optional[float] = 0.6     # 3b threshold; None disables the check (and its LLM call)
     cap: Optional[int] = None   # hard ceiling on qualified survivors; stop early once hit
 
     def setup_models(self, models:dict):
@@ -98,37 +102,24 @@ class QAItem:
 
 
 # instructor's structured-output target -- the only pydantic surface. Converted to
-# QAItem at the boundary; pydantic never leaves this module. Kept as a comment, not a
-# docstring, on purpose: instructor sends a model's docstring + field descriptions to
-# the LLM, so the docstring would leak into the prompt.
+# QAItem at the boundary; pydantic never leaves this module. Deliberately has no
+# docstring or field descriptions: instructor serializes both into the schema it sends
+# the LLM, so they would leak into the prompt. All generation guidance lives in the
+# instruction template (see .prompts), keeping this class a pure output shape.
 class _QAResponse(BaseModel):
     question : str
     answer   : str
 
-    # The generation prompt is coupled to this output shape, so the whole message template
-    # lives with the schema rather than as free module constants. ClassVar keeps it out of
-    # the JSON schema, so instructor's response is unaffected.
-    messages: ClassVar[list[dict]] = [
-        {
-            "role": "system",
-            "content": (
-                "You generate one question-answer pair from a passage extracted from a document. "
-                "The question must be answerable using only the passage and specific enough that it "
-                "points to this passage rather than general knowledge. The answer must be a concise, "
-                "factual statement supported by the passage. Do not ask about the passage's location, "
-                "figure or table numbers, or formatting."
-            )
-        },
-        {
-            "role": "user",
-            "content": "Passage:\n{chunk}\n\nGenerate one question and its answer."
-        },
-    ]
 
-    @classmethod
-    def build_messages(cls, chunk: str) -> list[dict]:
-        # Fresh list with each content formatted; never mutate the shared class template.
-        return [{**m, "content": m["content"].format(chunk=chunk)} for m in cls.messages]
+def _build_qa_messages(passage: str, custom_instruction: Optional[str] = None) -> list[dict]:
+    # The generation prompt: a fixed instruction (role + rubric + prohibitions + examples)
+    # as the system message, the passage as the user message. An optional custom_instruction
+    # is injected as a refine-not-replace block; absent, the block is dropped entirely.
+    block = CUSTOM_INSTRUCTIONS_BLOCK.format(custom_instruction=custom_instruction.strip()) if custom_instruction else ""
+    return [
+        {"role": "system", "content": INSTRUCTION_FOR_QA_SYNTHESIS.format(custom_instructions=block)},
+        {"role": "user", "content": f"Passage:\n{passage}\n\nWrite one question and its answer."},
+    ]
 
 
 def _chunk_text(record: ChunkRecord) -> str:
@@ -163,18 +154,19 @@ _BARE_SYSTEM = (
 )
 
 
+def _is_qualified(item: QAItem) -> bool:
+    # An item survives when no *enabled* check vetoes it: 3a must pass (answer in unit)
+    # and 3b must not (answerable without the doc). A disabled check leaves its verdict
+    # None, which abstains rather than vetoes -- so with both checks off every item passes.
+    return (item.answer_in_chunk is None or item.answer_in_chunk) \
+        and (item.answerable_without_doc is None or not item.answerable_without_doc)
+
+
 class Synthesizer:
-    """Generate + qualify, records-in. Holds two resolved litellm model kwargs
-    (generator / qualifier) and the two overlap thresholds; owns no doc lifecycle."""
+    """Generate + qualify, records-in. Stateless beyond its instructor client: the
+    per-run model kwargs and overlap thresholds are passed to run(); owns no doc lifecycle."""
 
-    def __init__(
-        self,
-        answer_overlap: float = 0.6,
-        bare_overlap: float = 0.6,
-    ):
-        self.answer_overlap = answer_overlap
-        self.bare_overlap = bare_overlap
-
+    def __init__(self):
         # acompletion -> instructor returns an AsyncInstructor; create() is awaitable.
         self._client = instructor.from_litellm(litellm.acompletion)
 
@@ -183,8 +175,9 @@ class Synthesizer:
         samples: list[Unit],
         synthesis_kwargs:dict={},
         qualifier_kwargs:dict={},
-        answer_overlap: float = 0.6,
-        bare_overlap: float = 0.6,
+        answer_overlap: Optional[float] = 0.6,
+        bare_overlap: Optional[float] = 0.6,
+        custom_instruction: Optional[str] = None,
         on_step: Optional[Callable[[QAItem], None]] = None,
         concurrency: int = 8,
         cap: Optional[int] = None,
@@ -208,7 +201,7 @@ class Synthesizer:
 
         async def process(unit: Unit) -> QAItem:
             async with sem:
-                item = await self._generate(unit, synthesis_kwargs)
+                item = await self._generate(unit, synthesis_kwargs, custom_instruction)
                 await self._qualify(
                     item,
                     unit,
@@ -222,7 +215,7 @@ class Synthesizer:
         try:
             for future in asyncio.as_completed(tasks):
                 item = await future
-                if item.answer_in_chunk and not item.answerable_without_doc:
+                if _is_qualified(item):
                     kept.append(item)
                 if on_step is not None:
                     on_step(item)
@@ -236,11 +229,11 @@ class Synthesizer:
             await asyncio.gather(*tasks, return_exceptions=True)
         return kept
 
-    async def _generate(self, unit: Unit, synthesis_kwargs:dict={}) -> QAItem:
+    async def _generate(self, unit: Unit, synthesis_kwargs:dict={}, custom_instruction: Optional[str] = None) -> QAItem:
         resp = await self._client.chat.completions.create(
             **synthesis_kwargs,
             response_model=_QAResponse,
-            messages=_QAResponse.build_messages(_unit_text(unit)),
+            messages=_build_qa_messages(_unit_text(unit), custom_instruction),
         )
         return QAItem(
             question=resp.question,
@@ -258,16 +251,19 @@ class Synthesizer:
         bare_overlap: Optional[float] = None,
     ) -> None:
 
-        answer_overlap = answer_overlap or self.answer_overlap
-        bare_overlap = bare_overlap or self.bare_overlap
+        # Either check is optional: a None threshold disables it, leaving its verdict
+        # None ("not evaluated"). 3b's None also skips the bare-answer LLM call. With both
+        # None nothing is qualified and every generated item survives.
 
         # 3a: deterministic -- is the answer's content actually in the source unit.
-        item.answer_in_chunk = _overlap(item.answer, _unit_text(unit)) >= answer_overlap
+        if answer_overlap is not None:
+            item.answer_in_chunk = _overlap(item.answer, _unit_text(unit)) >= answer_overlap
 
         # 3b: behavioural -- let the model answer the question with no document; if its
         # bare answer matches the gold answer, the question doesn't exercise retrieval.
-        bare = await self._bare_answer(item.question, qualifier_kwargs)
-        item.answerable_without_doc = _overlap(bare, item.answer) >= bare_overlap
+        if bare_overlap is not None:
+            bare = await self._bare_answer(item.question, qualifier_kwargs)
+            item.answerable_without_doc = _overlap(bare, item.answer) >= bare_overlap
 
     async def _bare_answer(self, question: str, qualifier_kwargs:dict={}) -> str:
         resp = await litellm.acompletion(
@@ -461,7 +457,7 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
             def on_step(item: QAItem, task=task, seen=seen) -> None:
                 raw.append(item)
                 artifact.write_dataset_raw(raw)
-                if item.answer_in_chunk and not item.answerable_without_doc:
+                if _is_qualified(item):
                     seen["kept"] += 1
                     qa.append(item)
                     artifact.write_dataset(qa)
@@ -472,6 +468,9 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
                 samples,
                 syn_config.synthesis_model,
                 syn_config.qualifier_model,
+                answer_overlap=syn_config.answer_overlap,
+                bare_overlap=syn_config.bare_overlap,
+                custom_instruction=syn_config.custom_instruction,
                 on_step=on_step,
                 concurrency=args.concurrency,
                 cap=syn_config.cap,
