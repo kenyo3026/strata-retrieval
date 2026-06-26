@@ -27,12 +27,21 @@ import pathlib
 import re
 import sys
 from dataclasses import dataclass, field, fields
-from typing import ClassVar, Optional, Union
+from typing import Callable, ClassVar, Optional, Union
 
 import instructor
 import litellm
 from config_morpher import ConfigMorpher
 from pydantic import BaseModel
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 
 from .main import DEFAULT_CHECKPOINT_ROOT, Main
 from .providers.record import ChunkRecord
@@ -164,10 +173,12 @@ class Synthesizer:
         qualifier_kwargs:dict={},
         answer_overlap: float = 0.6,
         bare_overlap: float = 0.6,
+        on_step: Optional[Callable[[QAItem], None]] = None,
     ) -> list[QAItem]:
         # Generate one QA per sampled chunk, qualify each, keep the survivors: the
         # answer must be in the chunk (3a) and the question must not be answerable
-        # without the document (3b).
+        # without the document (3b). on_step fires once per record (after both LLM
+        # calls) so the caller can report progress; it sees every item, kept or not.
         kept = []
         for record in samples:
             item = self._generate(record, synthesis_kwargs)
@@ -180,6 +191,8 @@ class Synthesizer:
             )
             if item.answer_in_chunk and not item.answerable_without_doc:
                 kept.append(item)
+            if on_step is not None:
+                on_step(item)
         return kept
 
     def _generate(self, record: ChunkRecord, synthesis_kwargs:dict={}) -> QAItem:
@@ -265,6 +278,18 @@ class SynthesisArgs:
         return parser
 
 
+def _match(record: ChunkRecord, where: dict) -> bool:
+    # A record passes when every attr satisfies its condition: membership for a
+    # list/set value, equality otherwise. The WHERE that runs before sampling --
+    # which records are eligible -- orthogonal to `key`, which only stratifies.
+    for attr, cond in where.items():
+        val = getattr(record, attr)
+        ok = val in cond if isinstance(cond, (list, set)) else val == cond
+        if not ok:
+            return False
+    return True
+
+
 def _sample(sampler: Sampler, mode: str, **kwargs) -> list[ChunkRecord]:
     # # Dispatch a sampling spec to the matching Sampler method. `key` is a record
     # # attribute name turned into the accessor Sampler expects, and applies only to
@@ -293,10 +318,18 @@ def synthesize(args: SynthesisArgs) -> list[QAItem]:
     """Open the sources into the checkpoint, then for each sampling spec in the
     config: sample, generate, and qualify. The spec list -- which doc, draw mode,
     count, stratification key, and generator model -- lives in config.yaml; the
-    qualifier model is the fixed `qualifier` block."""
-    main = Main(args.checkpoint)
+    qualifier model is the fixed `qualifier` block.
 
+    With args.verbose, a rich progress view is rendered to stderr (a per-doc bar
+    that ticks once per record with a live kept count), leaving stdout clean for
+    the JSON payload. Without it, the run is silent."""
+    # stderr so the JSON on stdout stays pipe-clean; disabled => the bar no-ops.
+    console = Console(stderr=True)
+
+    main = Main(args.checkpoint)
     for source in args.source or []:
+        if args.verbose:
+            console.print(f"[dim]opening[/] {source}")
         main.open(source)
 
     config_morpher = ConfigMorpher(args.config)
@@ -306,16 +339,51 @@ def synthesize(args: SynthesisArgs) -> list[QAItem]:
     }
 
     qa: list[QAItem] = []
-    for syn_config in config_morpher.fetch("synthesis", []):
-        syn_config = SynthesisConfig(**syn_config)
-        syn_config.setup_models(models=models)
+    generated = 0
+    specs = config_morpher.fetch("synthesis", [])
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("kept [green]{task.fields[kept]}"),
+        TimeElapsedColumn(),
+        console=console,
+        disable=not args.verbose,
+    )
+    with progress:
+        for syn_config in specs:
+            syn_config = SynthesisConfig(**syn_config)
+            syn_config.setup_models(models=models)
 
-        records = main.doc(syn_config.doc_id).records
-        sampler = Sampler(records, syn_config.doc_id)
-        samples = _sample(sampler, syn_config.sampler, **syn_config.sampling_kwargs)
+            records = main.doc(syn_config.doc_id).records
+            # pop, not read: `where` is a synthesis-side filter, not a Sampler param,
+            # so it must leave sampling_kwargs before the **splat into _sample.
+            where = syn_config.sampling_kwargs.pop("where", None)
+            if where:
+                records = [r for r in records if _match(r, where)]
+            sampler = Sampler(records, syn_config.doc_id)
+            samples = _sample(sampler, syn_config.sampler, **syn_config.sampling_kwargs)
+            generated += len(samples)
 
-        synthesizer = Synthesizer()
-        qa.extend(synthesizer.run(samples, syn_config.synthesis_model, syn_config.qualifier_model))
+            task = progress.add_task(syn_config.doc_id, total=len(samples), kept=0)
+            seen = {"kept": 0}
+
+            def on_step(item: QAItem, task=task, seen=seen) -> None:
+                if item.answer_in_chunk and not item.answerable_without_doc:
+                    seen["kept"] += 1
+                progress.update(task, advance=1, kept=seen["kept"])
+
+            synthesizer = Synthesizer()
+            qa.extend(synthesizer.run(
+                samples,
+                syn_config.synthesis_model,
+                syn_config.qualifier_model,
+                on_step=on_step,
+            ))
+
+    if args.verbose:
+        console.print(f"[green]done[/] generated {generated}, kept {len(qa)} across {len(specs)} docs")
 
     return qa
 

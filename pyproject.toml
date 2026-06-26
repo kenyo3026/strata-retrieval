@@ -39,6 +39,7 @@ synthesis = [
     "litellm>=1.0.0",
     "config-morpher @ git+https://github.com/kenyo3026/configmorpher.git@v0.1.2",
     "pydantic>=2.0.0",
+    "rich>=13.0.0",
 ]
 dev = [
     "pytest>=7.0.0",
