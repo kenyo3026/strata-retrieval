@@ -48,7 +48,7 @@ from rich.progress import (
 
 from .main import DEFAULT_CHECKPOINT_ROOT, Main
 from .providers.record import ChunkRecord
-from .providers.sampler import PageSample, SectionSample, Sampler
+from .providers.sampler import Sampler, Unit
 from .utils.mixin import NameWithLazyDatetime
 from .utils.projects import find_project_root
 
@@ -85,14 +85,15 @@ class SynthesisConfig:
 
 @dataclass
 class QAItem:
-    """One synthesized QA anchored to its source chunk. `source_id` == the
-    originating ChunkRecord.bbox_id -- the by-construction retrieval ground truth.
+    """One synthesized QA anchored to the records of its source unit. `source_ids` are
+    the bbox_ids of every record that fed generation -- the by-construction retrieval
+    ground truth: one id for a chunk unit, the whole span for a page / section unit.
     The two verdicts are step-3 qualification results, kept for auditability."""
     question               : str
     answer                 : str
-    source_id              : str
+    source_ids             : list
     doc_id                 : Optional[str]
-    answer_in_chunk        : Optional[bool] = None   # 3a: answer located in the chunk
+    answer_in_chunk        : Optional[bool] = None   # 3a: answer located in the unit
     answerable_without_doc : Optional[bool] = None   # 3b: answerable from bare knowledge
 
 
@@ -135,6 +136,12 @@ def _chunk_text(record: ChunkRecord) -> str:
     return record.content or record.html or ""
 
 
+def _unit_text(unit: Unit) -> str:
+    # The generatable context of a sampling unit: its records' text joined in reading
+    # order. One chunk for a chunk unit, the whole page / section for a many-record one.
+    return "\n".join(t for t in (_chunk_text(r) for r in unit.records) if t)
+
+
 def _tokens(text: str) -> set:
     return set(re.findall(r"\w+", text.lower()))
 
@@ -173,7 +180,7 @@ class Synthesizer:
 
     async def run(
         self,
-        samples: list[ChunkRecord],
+        samples: list[Unit],
         synthesis_kwargs:dict={},
         qualifier_kwargs:dict={},
         answer_overlap: float = 0.6,
@@ -182,36 +189,36 @@ class Synthesizer:
         concurrency: int = 8,
         cap: Optional[int] = None,
     ) -> list[QAItem]:
-        # Generate one QA per sampled chunk, qualify each, keep the survivors: the
-        # answer must be in the chunk (3a) and the question must not be answerable
-        # without the document (3b). Records run concurrently up to `concurrency` --
-        # generate->qualify stays sequential per record (qualify needs the generated
-        # question), but distinct records overlap, so latency-bound LLM calls amortize.
+        # Generate one QA per sampled unit, qualify each, keep the survivors: the answer
+        # must be in the unit (3a) and the question must not be answerable without the
+        # document (3b). Units run concurrently up to `concurrency` -- generate->qualify
+        # stays sequential per unit (qualify needs the generated question), but distinct
+        # units overlap, so latency-bound LLM calls amortize.
         #
         # cap is a hard ceiling on survivors: once `cap` are kept we stop draining and
-        # cancel every still-running / not-yet-started record, so the run ends without
+        # cancel every still-running / not-yet-started unit, so the run ends without
         # paying for the rest of the samples -- regardless of how many were drawn.
         #
-        # on_step fires once per completed record so the caller can report progress; it
+        # on_step fires once per completed unit so the caller can report progress; it
         # sees every drained item, kept or not. Results are drained one at a time in this
         # single coroutine, so on_step never interleaves -- a caller may append / write
         # from it without a lock. Items arrive in completion order.
         sem = asyncio.Semaphore(concurrency)
         kept = []
 
-        async def process(record: ChunkRecord) -> QAItem:
+        async def process(unit: Unit) -> QAItem:
             async with sem:
-                item = await self._generate(record, synthesis_kwargs)
+                item = await self._generate(unit, synthesis_kwargs)
                 await self._qualify(
                     item,
-                    record,
+                    unit,
                     qualifier_kwargs,
                     answer_overlap=answer_overlap,
                     bare_overlap=bare_overlap,
                 )
             return item
 
-        tasks = [asyncio.create_task(process(record)) for record in samples]
+        tasks = [asyncio.create_task(process(unit)) for unit in samples]
         try:
             for future in asyncio.as_completed(tasks):
                 item = await future
@@ -229,23 +236,23 @@ class Synthesizer:
             await asyncio.gather(*tasks, return_exceptions=True)
         return kept
 
-    async def _generate(self, record: ChunkRecord, synthesis_kwargs:dict={}) -> QAItem:
+    async def _generate(self, unit: Unit, synthesis_kwargs:dict={}) -> QAItem:
         resp = await self._client.chat.completions.create(
             **synthesis_kwargs,
             response_model=_QAResponse,
-            messages=_QAResponse.build_messages(_chunk_text(record)),
+            messages=_QAResponse.build_messages(_unit_text(unit)),
         )
         return QAItem(
             question=resp.question,
             answer=resp.answer,
-            source_id=record.bbox_id,
-            doc_id=record.doc_id,
+            source_ids=[r.bbox_id for r in unit.records],
+            doc_id=unit.records[0].doc_id,
         )
 
     async def _qualify(
         self,
         item: QAItem,
-        record: ChunkRecord,
+        unit: Unit,
         qualifier_kwargs:dict={},
         answer_overlap: Optional[float] = None,
         bare_overlap: Optional[float] = None,
@@ -254,8 +261,8 @@ class Synthesizer:
         answer_overlap = answer_overlap or self.answer_overlap
         bare_overlap = bare_overlap or self.bare_overlap
 
-        # 3a: deterministic -- is the answer's content actually in the source chunk.
-        item.answer_in_chunk = _overlap(item.answer, _chunk_text(record)) >= answer_overlap
+        # 3a: deterministic -- is the answer's content actually in the source unit.
+        item.answer_in_chunk = _overlap(item.answer, _unit_text(unit)) >= answer_overlap
 
         # 3b: behavioural -- let the model answer the question with no document; if its
         # bare answer matches the gold answer, the question doesn't exercise retrieval.
@@ -278,10 +285,11 @@ class SynthesisArtifact(type(pathlib.Path())):
 
     Holds two QA files -- `dataset` (qualification survivors, the test set) and its
     `dataset_raw` superset (every generated item with its verdicts, pre-filter) -- plus
-    per source doc the full record universe and the sampled subset that fed generation.
-    The two record files are keyed by bbox_id, so a QAItem.source_id reverse-looks-up its
-    ref full text (open the doc's records by the item's doc_id, index by source_id). Pure
-    addressing + writes; no run logic.
+    per source doc the full record universe. The record file is keyed by bbox_id, so each
+    id in a QAItem.source_ids reverse-looks-up its ref full text (open the doc's records by
+    the item's doc_id, index by the source_ids); the drawn units are themselves recoverable
+    from dataset_raw's source_ids, so no separate sample file is kept. Pure addressing +
+    writes; no run logic.
     """
 
     @property
@@ -295,12 +303,10 @@ class SynthesisArtifact(type(pathlib.Path())):
     def records(self, doc_id: str) -> pathlib.Path:
         return self / f"{doc_id}_records.json"
 
-    def sample_records(self, doc_id: str) -> pathlib.Path:
-        return self / f"{doc_id}_sample_records.json"
-
     def _dump_by_id(self, records: list[ChunkRecord]) -> str:
-        # bbox_id-keyed so dataset's source_id indexes straight in; a dict preserves
-        # insertion (reading) order on py3.7+, so nothing is lost versus a list.
+        # bbox_id-keyed so each id in dataset's source_ids indexes straight in; a dict
+        # preserves insertion (reading) order on py3.7+, so nothing is lost versus a list,
+        # and dedups records shared across overlapping units (by-level sections).
         return json.dumps(
             {r.bbox_id: dataclasses.asdict(r) for r in records},
             ensure_ascii=False,
@@ -310,10 +316,6 @@ class SynthesisArtifact(type(pathlib.Path())):
     def write_records(self, doc_id: str, records: list[ChunkRecord]) -> None:
         self.mkdir(parents=True, exist_ok=True)
         self.records(doc_id).write_text(self._dump_by_id(records), encoding="utf-8")
-
-    def write_sample_records(self, doc_id: str, samples: list[ChunkRecord]) -> None:
-        self.mkdir(parents=True, exist_ok=True)
-        self.sample_records(doc_id).write_text(self._dump_by_id(samples), encoding="utf-8")
 
     def write_dataset(self, qa: list[QAItem]) -> None:
         self.mkdir(parents=True, exist_ok=True)
@@ -376,60 +378,19 @@ def _dump(qa: list[QAItem]) -> str:
     return json.dumps([dataclasses.asdict(it) for it in qa], ensure_ascii=False, indent=2)
 
 
-def _section_record(sample: SectionSample) -> ChunkRecord:
-    # Collapse a sampled section into one generatable record: its text joined in
-    # reading order, anchored to the section key (the title's bbox_id) so the QA's
-    # source_id resolves to the whole section via the sample_records dump. Keeps the
-    # pipeline chunk-granular -- one QA per section -- with no change downstream.
-    head = sample.records[0]
-    text = "\n".join(t for t in (_chunk_text(r) for r in sample.records) if t)
-    return ChunkRecord(
-        doc_id=head.doc_id,
-        bbox_id=sample.key,
-        parent_bbox_id=None,
-        page_idx=head.page_idx,
-        page_size=head.page_size,
-        bbox=None,
-        label="section",
-        composite_label="section",
-        reading_order=head.reading_order,
-        score=None,
-        content=text,
-        html=None,
-        image_path=None,
-        inline_equations=[],
-        has_equation=any(r.has_equation for r in sample.records),
-        has_image=any(r.has_image for r in sample.records),
-    )
-
-
-def _sample(sampler: Sampler, mode: str, **kwargs) -> list[ChunkRecord]:
-    # # Dispatch a sampling spec to the matching Sampler method. `key` is a record
-    # # attribute name turned into the accessor Sampler expects, and applies only to
-    # # chunk modes; page modes have no stratification key and come back as whole
-    # # PageSamples, which we flatten to records so QA stays chunk (bbox_id) granular.
-    draw = getattr(sampler, mode)
-
-    if draw.__func__ in sampler.CHUNK_BASED_SAMPLING:
-        if key:=kwargs.get("key"):
-            kwargs["key"] = (lambda r, _k=key: getattr(r, _k)) if key else None
-        samples = draw(**kwargs)
-
-    elif draw.__func__ in sampler.PAGE_BASED_SAMPLING:
-        samples = draw(**kwargs)
-        if samples and isinstance(samples[0], PageSample):
-            samples = [record for page in samples for record in page.records]
-
-    elif draw.__func__ in sampler.SECTION_BASED_SAMPLING:
-        # One QA per section: collapse each drawn section to a fat record whose
-        # content is the whole section text, keyed by the section's title bbox_id.
-        samples = [_section_record(s) for s in draw(**kwargs)]
-
-    else:
-        supported = sorted(f.__name__ for f in (*sampler.CHUNK_BASED_SAMPLING, *sampler.PAGE_BASED_SAMPLING, *sampler.SECTION_BASED_SAMPLING))
-        raise ValueError(f"unsupported sampling mode {mode!r}; expected one of {supported}")
-
-    return samples
+def _sample(sampler: Sampler, mode: str, **kwargs) -> list[Unit]:
+    # Dispatch a sampling spec to the matching Sampler method, which returns the drawn
+    # Units -- each one context the generator treats as a single ref, regardless of mode.
+    # `key` is a record attribute name turned into the accessor Sampler expects (chunk
+    # modes only); other kwargs (k / fraction / level / where) splat straight through.
+    draw = getattr(sampler, mode, None)
+    supported = {*sampler.CHUNK_BASED_SAMPLING, *sampler.PAGE_BASED_SAMPLING, *sampler.SECTION_BASED_SAMPLING}
+    if draw is None or getattr(draw, "__func__", None) not in supported:
+        names = sorted(f.__name__ for f in supported)
+        raise ValueError(f"unsupported sampling mode {mode!r}; expected one of {names}")
+    if key := kwargs.get("key"):
+        kwargs["key"] = (lambda r, _k=key: getattr(r, _k))
+    return draw(**kwargs)
 
 
 async def synthesize(args: SynthesisArgs) -> list[QAItem]:
@@ -445,7 +406,7 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
     Output is a SynthesisArtifact dir: dataset.raw.json (every generated item) and
     dataset.json (the qualification survivors), both rewritten as they grow so a long
     run is observable and survivable mid-flight, plus, per doc, the full record universe
-    and the sampled subset that fed generation."""
+    that source_ids reverse-look-up into."""
     # stderr so the JSON on stdout stays pipe-clean; disabled => the bar no-ops.
     console = Console(stderr=True)
     artifact = SynthesisArtifact(args.out_dir)
@@ -481,15 +442,13 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
             syn_config.setup_models(models=models)
 
             records = main.doc(syn_config.doc_id).records
-            # The full record universe -- so source_id can reverse-look-up its ref full
+            # The full record universe -- so source_ids can reverse-look-up their ref full
             # text and refs can expand to neighbours later. `where` is no longer a
             # synthesis-side pre-filter: it rides in sampling_kwargs and is applied
             # per-unit inside the sampler (after pages / sections are built).
             artifact.write_records(syn_config.doc_id, records)
             sampler = Sampler(records, syn_config.doc_id)
             samples = _sample(sampler, syn_config.sampler, **syn_config.sampling_kwargs)
-            # The sampled subset that actually fed generation -- the draw's audit trail.
-            artifact.write_sample_records(syn_config.doc_id, samples)
 
             task = progress.add_task(syn_config.doc_id, total=len(samples), kept=0)
             seen = {"kept": 0}
