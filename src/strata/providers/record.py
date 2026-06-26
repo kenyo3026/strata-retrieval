@@ -98,3 +98,30 @@ def iter_sections(records: list[ChunkRecord]) -> list[list[ChunkRecord]]:
     if preamble:
         sections.insert(0, preamble)
     return sections
+
+
+def iter_sections_by_level(records: list[ChunkRecord], level=None) -> list[list[ChunkRecord]]:
+    """Project the section tree by heading level: every title whose level is wanted
+    becomes its own section -- the title plus its whole subtree in reading order, the
+    sections coming back in document order. `level` selects which levels count: None
+    is all levels, an int is that one level, a list[int] is those levels (which may be
+    non-contiguous, e.g. [1, 2, 4]).
+
+    Unlike iter_sections (top-level sections that tile the document disjointly), these
+    sections nest: a level-1 title's section folds in the level-2 titles under it, and
+    each of those level-2 titles is in turn its own section, so a block can appear in
+    more than one. Titles without a level can't be ranked and are skipped, as is the
+    leading title-less run. Derived from build_section_tree so the boundary rule stays
+    single-sourced.
+    """
+    wanted = None if level is None else ({level} if isinstance(level, int) else set(level))
+    tree = build_section_tree(records)
+    by_id = {r.bbox_id: r for r in records}
+    sections: list[list[ChunkRecord]] = []
+    for r in records:                       # document order
+        if "title" not in r.label or r.level is None:
+            continue
+        if wanted is not None and r.level not in wanted:
+            continue
+        sections.append([by_id[i] for i in traverse_subtree(tree, r.bbox_id)])
+    return sections
