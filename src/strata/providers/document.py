@@ -13,7 +13,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from typing import Optional, Union
 
-from .record import ChunkRecord, build_section_tree
+from .record import ChunkRecord, build_section_tree, section_subtree
 
 _SNIPPET_LEN = 80
 
@@ -365,13 +365,7 @@ class Document:
         # run, which yields that whole run.
         if self._preamble and bbox_id == self._preamble[0]:
             return [self._by_id[i] for i in self._preamble]
-        out = [self._by_id[bbox_id]]
-        stack = list(reversed(self._section_children.get(bbox_id, [])))
-        while stack:
-            child = stack.pop()
-            out.append(self._by_id[child])
-            stack.extend(reversed(self._section_children.get(child, [])))
-        return out
+        return [self._by_id[i] for i in section_subtree(self._section_children, bbox_id)]
 
     def next(self, bbox_id: str) -> Optional[str]:
         pos = self._position[bbox_id] + 1

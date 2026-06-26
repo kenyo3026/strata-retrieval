@@ -48,7 +48,7 @@ from rich.progress import (
 
 from .main import DEFAULT_CHECKPOINT_ROOT, Main
 from .providers.record import ChunkRecord
-from .providers.sampler import PageSample, Sampler
+from .providers.sampler import PageSample, SectionSample, Sampler
 from .utils.mixin import NameWithLazyDatetime
 from .utils.projects import find_project_root
 
@@ -388,6 +388,33 @@ def _dump(qa: list[QAItem]) -> str:
     return json.dumps([dataclasses.asdict(it) for it in qa], ensure_ascii=False, indent=2)
 
 
+def _section_record(sample: SectionSample) -> ChunkRecord:
+    # Collapse a sampled section into one generatable record: its text joined in
+    # reading order, anchored to the section key (the title's bbox_id) so the QA's
+    # source_id resolves to the whole section via the sample_records dump. Keeps the
+    # pipeline chunk-granular -- one QA per section -- with no change downstream.
+    head = sample.records[0]
+    text = "\n".join(t for t in (_chunk_text(r) for r in sample.records) if t)
+    return ChunkRecord(
+        doc_id=head.doc_id,
+        bbox_id=sample.key,
+        parent_bbox_id=None,
+        page_idx=head.page_idx,
+        page_size=head.page_size,
+        bbox=None,
+        label="section",
+        composite_label="section",
+        reading_order=head.reading_order,
+        score=None,
+        content=text,
+        html=None,
+        image_path=None,
+        inline_equations=[],
+        has_equation=any(r.has_equation for r in sample.records),
+        has_image=any(r.has_image for r in sample.records),
+    )
+
+
 def _sample(sampler: Sampler, mode: str, **kwargs) -> list[ChunkRecord]:
     # # Dispatch a sampling spec to the matching Sampler method. `key` is a record
     # # attribute name turned into the accessor Sampler expects, and applies only to
@@ -405,8 +432,13 @@ def _sample(sampler: Sampler, mode: str, **kwargs) -> list[ChunkRecord]:
         if samples and isinstance(samples[0], PageSample):
             samples = [record for page in samples for record in page.records]
 
+    elif draw.__func__ in sampler.SECTION_BASED_SAMPLING:
+        # One QA per section: collapse each drawn section to a fat record whose
+        # content is the whole section text, keyed by the section's title bbox_id.
+        samples = [_section_record(s) for s in draw(**kwargs)]
+
     else:
-        supported = sorted(f.__name__ for f in (*sampler.CHUNK_BASED_SAMPLING, *sampler.PAGE_BASED_SAMPLING))
+        supported = sorted(f.__name__ for f in (*sampler.CHUNK_BASED_SAMPLING, *sampler.PAGE_BASED_SAMPLING, *sampler.SECTION_BASED_SAMPLING))
         raise ValueError(f"unsupported sampling mode {mode!r}; expected one of {supported}")
 
     return samples

@@ -16,7 +16,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from .record import ChunkRecord
+from .record import ChunkRecord, iter_sections
 
 
 @dataclass
@@ -25,6 +25,15 @@ class PageSample:
     reading order. The page is the sampling unit -- nothing inside it is dropped."""
     page_idx : int
     records  : list
+
+
+@dataclass
+class SectionSample:
+    """A sampled section delivered whole: its key (the title's bbox_id, or the first
+    block for the leading title-less run) plus every record in it in reading order.
+    The section is the sampling unit -- its whole subtree is folded in."""
+    key     : str
+    records : list
 
 
 def _stratify(records: list[ChunkRecord], key: Optional[Callable[[ChunkRecord], object]]) -> dict:
@@ -62,14 +71,6 @@ class Sampler:
         self.doc_id = doc_id if doc_id is not None else (records[0].doc_id if records else None)
         self.records = records
 
-    def sample_pages(self, k: Optional[int] = None, fraction: Optional[float] = None, seed: Optional[int] = None) -> list[PageSample]:
-        # Whole-page sampling without replacement: pick a subset of page indices,
-        # return each with all its records. Output stays in page order.
-        by_page = _stratify(self.records, lambda r: r.page_idx)
-        pages = list(by_page)
-        chosen = random.Random(seed).sample(pages, _draw_count(len(pages), k, fraction))
-        return [PageSample(page_idx=p, records=by_page[p]) for p in sorted(chosen)]
-
     def sample_chunks(self, k: Optional[int] = None, fraction: Optional[float] = None, key: Optional[Callable[[ChunkRecord], object]] = None, seed: Optional[int] = None) -> list[ChunkRecord]:
         # Chunk sampling without replacement. With `key`, k / fraction apply *per
         # stratum* -- "one chunk per page" is k=1, key=page; "two per kind" is k=2,
@@ -82,15 +83,24 @@ class Sampler:
                 chosen.add(r.bbox_id)
         return [r for r in self.records if r.bbox_id in chosen]
 
-    def sample_pages_with_replacement(self, k: Optional[int] = None, fraction: Optional[float] = None, seed: Optional[int] = None) -> list[PageSample]:
-        # Whole-page bootstrap: the same page can be drawn more than once. Output is
-        # in draw order and may repeat. k / fraction are uncapped (None = pool size).
+    def sample_pages(self, k: Optional[int] = None, fraction: Optional[float] = None, seed: Optional[int] = None) -> list[PageSample]:
+        # Whole-page sampling without replacement: pick a subset of page indices,
+        # return each with all its records. Output stays in page order.
         by_page = _stratify(self.records, lambda r: r.page_idx)
         pages = list(by_page)
-        if not pages:
+        chosen = random.Random(seed).sample(pages, _draw_count(len(pages), k, fraction))
+        return [PageSample(page_idx=p, records=by_page[p]) for p in sorted(chosen)]
+
+    def sample_sections(self, k: Optional[int] = None, fraction: Optional[float] = None, seed: Optional[int] = None) -> list[SectionSample]:
+        # Whole-section sampling without replacement: project the records into the
+        # document's top-level sections (each a title plus its subtree), pick a
+        # subset, and return each whole. Output stays in document order. The section
+        # is the unit -- like sample_pages, nothing inside a drawn section is dropped.
+        sections = iter_sections(self.records)
+        if not sections:
             return []
-        drawn = random.Random(seed).choices(pages, k=_draw_count(len(pages), k, fraction, capped=False))
-        return [PageSample(page_idx=p, records=by_page[p]) for p in drawn]
+        chosen = random.Random(seed).sample(range(len(sections)), _draw_count(len(sections), k, fraction))
+        return [SectionSample(key=sections[i][0].bbox_id, records=sections[i]) for i in sorted(chosen)]
 
     def sample_chunks_with_replacement(self, k: Optional[int] = None, fraction: Optional[float] = None, key: Optional[Callable[[ChunkRecord], object]] = None, seed: Optional[int] = None) -> list[ChunkRecord]:
         # Chunk bootstrap: within each stratum a record can be picked more than once.
@@ -104,9 +114,33 @@ class Sampler:
             drawn.extend(rng.choices(pool, k=_draw_count(len(pool), k, fraction, capped=False)))
         return drawn
 
+    def sample_pages_with_replacement(self, k: Optional[int] = None, fraction: Optional[float] = None, seed: Optional[int] = None) -> list[PageSample]:
+        # Whole-page bootstrap: the same page can be drawn more than once. Output is
+        # in draw order and may repeat. k / fraction are uncapped (None = pool size).
+        by_page = _stratify(self.records, lambda r: r.page_idx)
+        pages = list(by_page)
+        if not pages:
+            return []
+        drawn = random.Random(seed).choices(pages, k=_draw_count(len(pages), k, fraction, capped=False))
+        return [PageSample(page_idx=p, records=by_page[p]) for p in drawn]
+
+    def sample_sections_with_replacement(self, k: Optional[int] = None, fraction: Optional[float] = None, seed: Optional[int] = None) -> list[SectionSample]:
+        # Whole-section bootstrap: the same section can be drawn more than once. Output
+        # is in draw order and may repeat. k / fraction are uncapped (None = pool size).
+        sections = iter_sections(self.records)
+        if not sections:
+            return []
+        drawn = random.Random(seed).choices(range(len(sections)), k=_draw_count(len(sections), k, fraction, capped=False))
+        return [SectionSample(key=sections[i][0].bbox_id, records=sections[i]) for i in drawn]
+
     PAGE_BASED_SAMPLING = {
         sample_pages,
         sample_pages_with_replacement,
+    }
+
+    SECTION_BASED_SAMPLING = {
+        sample_sections,
+        sample_sections_with_replacement,
     }
 
     CHUNK_BASED_SAMPLING = {

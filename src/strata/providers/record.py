@@ -65,3 +65,36 @@ def build_section_tree(records: list[ChunkRecord]) -> dict[Optional[str], list[s
     for r in records:                       # second pass keeps children in reading order
         children[parent_of[r.bbox_id]].append(r.bbox_id)
     return dict(children)
+
+
+def section_subtree(tree: dict[Optional[str], list[str]], root: str) -> list[str]:
+    """A section root's bbox_id plus all its descendants in reading order -- preorder
+    over the tree, whose children are already in reading order."""
+    out = [root]
+    stack = list(reversed(tree.get(root, [])))
+    while stack:
+        nid = stack.pop()
+        out.append(nid)
+        stack.extend(reversed(tree.get(nid, [])))
+    return out
+
+
+def iter_sections(records: list[ChunkRecord]) -> list[list[ChunkRecord]]:
+    """Project the section tree into the document's top-level sections in reading
+    order: the leading title-less run (if any) first, then each top-level title with
+    its whole subtree folded in. Derived from build_section_tree so the boundary rule
+    stays single-sourced; the sections are disjoint and cover every record, the way
+    pages tile a document. This is the tree -> list view by-section sampling draws on.
+    """
+    tree = build_section_tree(records)
+    by_id = {r.bbox_id: r for r in records}
+    sections: list[list[ChunkRecord]] = []
+    preamble: list[ChunkRecord] = []
+    for rid in tree.get(None, []):
+        if "title" in by_id[rid].label:
+            sections.append([by_id[i] for i in section_subtree(tree, rid)])
+        else:
+            preamble.append(by_id[rid])   # leading run is contiguous at the front
+    if preamble:
+        sections.insert(0, preamble)
+    return sections
