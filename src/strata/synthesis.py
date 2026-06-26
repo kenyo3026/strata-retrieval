@@ -25,9 +25,11 @@ import dataclasses
 import json
 import logging
 import pathlib
+import shutil
 import re
 import sys
 from dataclasses import dataclass, field, fields
+from datetime import datetime
 from typing import Callable, ClassVar, Optional, Union
 
 import instructor
@@ -52,7 +54,7 @@ from .utils.projects import find_project_root
 
 
 DEFAULT_CONFIG_PATH = find_project_root() / "configs" / "config.yaml"
-DEFAULT_OUTPUT_DIR = find_project_root() / "outputs"
+DEFAULT_OUTPUT_ROOT = find_project_root() / "outputs"
 
 
 # Non-OpenAI models reject params they don't support; drop them rather than 400.
@@ -253,6 +255,57 @@ class Synthesizer:
         return resp.choices[0].message.content or ""
 
 
+class SynthesisArtifact(type(pathlib.Path())):
+    """One synthesis run's output bundle, addressed like MinerUArtifact / DocCheckpoint.
+
+    Holds two QA files -- `dataset` (qualification survivors, the test set) and its
+    `dataset_raw` superset (every generated item with its verdicts, pre-filter) -- plus
+    per source doc the full record universe and the sampled subset that fed generation.
+    The two record files are keyed by bbox_id, so a QAItem.source_id reverse-looks-up its
+    ref full text (open the doc's records by the item's doc_id, index by source_id). Pure
+    addressing + writes; no run logic.
+    """
+
+    @property
+    def dataset(self) -> pathlib.Path:
+        return self / "dataset.json"
+
+    @property
+    def dataset_raw(self) -> pathlib.Path:
+        return self / "dataset.raw.json"
+
+    def records(self, doc_id: str) -> pathlib.Path:
+        return self / f"{doc_id}_records.json"
+
+    def sample_records(self, doc_id: str) -> pathlib.Path:
+        return self / f"{doc_id}_sample_records.json"
+
+    def _dump_by_id(self, records: list[ChunkRecord]) -> str:
+        # bbox_id-keyed so dataset's source_id indexes straight in; a dict preserves
+        # insertion (reading) order on py3.7+, so nothing is lost versus a list.
+        return json.dumps(
+            {r.bbox_id: dataclasses.asdict(r) for r in records},
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    def write_records(self, doc_id: str, records: list[ChunkRecord]) -> None:
+        self.mkdir(parents=True, exist_ok=True)
+        self.records(doc_id).write_text(self._dump_by_id(records), encoding="utf-8")
+
+    def write_sample_records(self, doc_id: str, samples: list[ChunkRecord]) -> None:
+        self.mkdir(parents=True, exist_ok=True)
+        self.sample_records(doc_id).write_text(self._dump_by_id(samples), encoding="utf-8")
+
+    def write_dataset(self, qa: list[QAItem]) -> None:
+        self.mkdir(parents=True, exist_ok=True)
+        self.dataset.write_text(_dump(qa), encoding="utf-8")
+
+    def write_dataset_raw(self, items: list[QAItem]) -> None:
+        self.mkdir(parents=True, exist_ok=True)
+        self.dataset_raw.write_text(_dump(items), encoding="utf-8")
+
+
 @dataclass
 class SynthesisArgs:
     """Arg schema + parser for the synthesis entry, aligned with the eval project's
@@ -261,7 +314,7 @@ class SynthesisArgs:
     config          : str = str(DEFAULT_CONFIG_PATH)
     source          : Optional[list] = None
     checkpoint      : str = str(DEFAULT_CHECKPOINT_ROOT)
-    out             : str = str(DEFAULT_OUTPUT_DIR)
+    out_dir         : str = None #str(DEFAULT_OUTPUT_ROOT)
     concurrency     : int = 8
     verbose         : bool = True
     log_level       : str = "ERROR"
@@ -287,11 +340,18 @@ class SynthesisArgs:
             default=self.checkpoint,
             help="Persist opened docs here; reuse the same dir to inherit them on restart.",
         )
-        parser.add_argument("-o", "--out", default=self.out, help="Write the QA set as JSON here")
+        parser.add_argument("-o", "--out_dir", default=self.out_dir, help="Write the systhesized QA set directory here")
         parser.add_argument("--concurrency", type=int, default=self.concurrency, help="Max records processed concurrently (in-flight LLM pipelines)")
         parser.add_argument("--no-verbose", dest="verbose", action="store_false", default=self.verbose, help="Silence the full-payload print to stdout")
         parser.add_argument("--log-level", default=self.log_level, choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level; default ERROR hides LiteLLM warnings")
         return parser
+
+    def __post_init__(self):
+        if not self.out_dir and DEFAULT_OUTPUT_ROOT:
+            self.out_dir = DEFAULT_OUTPUT_ROOT / str(NameWithLazyDatetime("out"))
+
+        self.out_dir = pathlib.Path(self.out_dir)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _match(record: ChunkRecord, where: dict) -> bool:
@@ -304,17 +364,6 @@ def _match(record: ChunkRecord, where: dict) -> bool:
         if not ok:
             return False
     return True
-
-
-def _resolve_out_file(out: str) -> pathlib.Path:
-    # A path with a suffix is the target file; a bare directory (or one not yet
-    # created) gets a timestamped filename. Parent is ensured either way.
-    path = pathlib.Path(out)
-    if path.suffix:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return path
-    path.mkdir(parents=True, exist_ok=True)
-    return path / f"{NameWithLazyDatetime(prefix='out')}.json"
 
 
 def _dump(qa: list[QAItem]) -> str:
@@ -355,11 +404,13 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
     that ticks once per record with a live kept count), leaving stdout clean for
     the JSON payload. Without it, the run is silent.
 
-    When args.out is set the file is rewritten after every kept item, so a long
-    run is observable and survivable mid-flight rather than landing only at the end."""
+    Output is a SynthesisArtifact dir: dataset.raw.json (every generated item) and
+    dataset.json (the qualification survivors), both rewritten as they grow so a long
+    run is observable and survivable mid-flight, plus, per doc, the full record universe
+    and the sampled subset that fed generation."""
     # stderr so the JSON on stdout stays pipe-clean; disabled => the bar no-ops.
     console = Console(stderr=True)
-    out_file = _resolve_out_file(args.out) if args.out else None
+    artifact = SynthesisArtifact(args.out_dir)
 
     main = Main(args.checkpoint)
     for source in args.source or []:
@@ -373,7 +424,8 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
         for m in config_morpher.fetch("models", [])
     }
 
-    qa: list[QAItem] = []
+    qa: list[QAItem] = []     # qualification survivors -> dataset.json
+    raw: list[QAItem] = []    # every generated item -> dataset.raw.json
     generated = 0
     specs = config_morpher.fetch("synthesis", [])
     progress = Progress(
@@ -392,6 +444,9 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
             syn_config.setup_models(models=models)
 
             records = main.doc(syn_config.doc_id).records
+            # The full record universe, before the where filter -- so source_id can
+            # reverse-look-up its ref full text and refs can expand to neighbours later.
+            artifact.write_records(syn_config.doc_id, records)
             # pop, not read: `where` is a synthesis-side filter, not a Sampler param,
             # so it must leave sampling_kwargs before the **splat into _sample.
             where = syn_config.sampling_kwargs.pop("where", None)
@@ -399,21 +454,25 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
                 records = [r for r in records if _match(r, where)]
             sampler = Sampler(records, syn_config.doc_id)
             samples = _sample(sampler, syn_config.sampler, **syn_config.sampling_kwargs)
+            # The sampled subset that actually fed generation -- the draw's audit trail.
+            artifact.write_sample_records(syn_config.doc_id, samples)
             generated += len(samples)
 
             task = progress.add_task(syn_config.doc_id, total=len(samples), kept=0)
             seen = {"kept": 0}
 
-            # on_step accumulates kept items into qa and flushes the file each time,
-            # so accumulation lives here (not via run's return) to keep one writer.
-            # run calls it synchronously with no await between, so even under concurrent
-            # records it never interleaves -- no lock needed. qa is in completion order.
+            # on_step accumulates every item into raw and the survivors into qa, flushing
+            # each file as it grows, so accumulation lives here (not via run's return) to
+            # keep one writer. run calls it synchronously with no await between, so even
+            # under concurrent records it never interleaves -- no lock needed. Both lists
+            # are in completion order.
             def on_step(item: QAItem, task=task, seen=seen) -> None:
+                raw.append(item)
+                artifact.write_dataset_raw(raw)
                 if item.answer_in_chunk and not item.answerable_without_doc:
                     seen["kept"] += 1
                     qa.append(item)
-                    if out_file is not None:
-                        out_file.write_text(_dump(qa), encoding="utf-8")
+                    artifact.write_dataset(qa)
                 progress.update(task, advance=1, kept=seen["kept"])
 
             synthesizer = Synthesizer()
@@ -425,13 +484,12 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
                 concurrency=args.concurrency,
             )
 
-    # Final flush so the file exists even when nothing was kept.
-    if out_file is not None:
-        out_file.write_text(_dump(qa), encoding="utf-8")
+    # Final flush so both files exist even when nothing was generated / kept.
+    artifact.write_dataset_raw(raw)
+    artifact.write_dataset(qa)
 
     if args.verbose:
-        tail = f" -> {out_file}" if out_file is not None else ""
-        console.print(f"[green]done[/] generated {generated}, kept {len(qa)} across {len(specs)} docs{tail}")
+        console.print(f"[green]done[/] generated {generated}, kept {len(qa)} across {len(specs)} docs -> {artifact}")
 
     return qa
 
