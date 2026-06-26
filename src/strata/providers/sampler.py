@@ -16,7 +16,12 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from .record import ChunkRecord, iter_sections
+from .record import ChunkRecord, iter_sections, iter_sections_by_level
+
+
+# Sentinel for sample_sections' `level`: distinguishes "not passed" (keep the legacy
+# top-level disjoint projection) from an explicit level=None ("all levels", nested).
+_TOP_LEVEL_SECTIONS = object()
 
 
 @dataclass
@@ -91,12 +96,14 @@ class Sampler:
         chosen = random.Random(seed).sample(pages, _draw_count(len(pages), k, fraction))
         return [PageSample(page_idx=p, records=by_page[p]) for p in sorted(chosen)]
 
-    def sample_sections(self, k: Optional[int] = None, fraction: Optional[float] = None, seed: Optional[int] = None) -> list[SectionSample]:
-        # Whole-section sampling without replacement: project the records into the
-        # document's top-level sections (each a title plus its subtree), pick a
-        # subset, and return each whole. Output stays in document order. The section
-        # is the unit -- like sample_pages, nothing inside a drawn section is dropped.
-        sections = iter_sections(self.records)
+    def sample_sections(self, k: Optional[int] = None, fraction: Optional[float] = None, level=_TOP_LEVEL_SECTIONS, seed: Optional[int] = None) -> list[SectionSample]:
+        # Whole-section sampling without replacement: project the records into sections
+        # (each a title plus its subtree), pick a subset, and return each whole. Output
+        # stays in document order. The section is the unit -- like sample_pages, nothing
+        # inside a drawn section is dropped. `level` chooses the projection: omitted keeps
+        # the top-level disjoint tiling; given (None=all levels, int / list[int]=those
+        # levels) switches to the by-level projection, whose sections nest and may overlap.
+        sections = iter_sections(self.records) if level is _TOP_LEVEL_SECTIONS else iter_sections_by_level(self.records, level)
         if not sections:
             return []
         chosen = random.Random(seed).sample(range(len(sections)), _draw_count(len(sections), k, fraction))
@@ -124,10 +131,11 @@ class Sampler:
         drawn = random.Random(seed).choices(pages, k=_draw_count(len(pages), k, fraction, capped=False))
         return [PageSample(page_idx=p, records=by_page[p]) for p in drawn]
 
-    def sample_sections_with_replacement(self, k: Optional[int] = None, fraction: Optional[float] = None, seed: Optional[int] = None) -> list[SectionSample]:
+    def sample_sections_with_replacement(self, k: Optional[int] = None, fraction: Optional[float] = None, level=_TOP_LEVEL_SECTIONS, seed: Optional[int] = None) -> list[SectionSample]:
         # Whole-section bootstrap: the same section can be drawn more than once. Output
         # is in draw order and may repeat. k / fraction are uncapped (None = pool size).
-        sections = iter_sections(self.records)
+        # `level` selects the projection, as in sample_sections.
+        sections = iter_sections(self.records) if level is _TOP_LEVEL_SECTIONS else iter_sections_by_level(self.records, level)
         if not sections:
             return []
         drawn = random.Random(seed).choices(range(len(sections)), k=_draw_count(len(sections), k, fraction, capped=False))
