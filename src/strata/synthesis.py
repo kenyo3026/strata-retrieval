@@ -372,18 +372,6 @@ class SynthesisArgs:
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _match(record: ChunkRecord, where: dict) -> bool:
-    # A record passes when every attr satisfies its condition: membership for a
-    # list/set value, equality otherwise. The WHERE that runs before sampling --
-    # which records are eligible -- orthogonal to `key`, which only stratifies.
-    for attr, cond in where.items():
-        val = getattr(record, attr)
-        ok = val in cond if isinstance(cond, (list, set)) else val == cond
-        if not ok:
-            return False
-    return True
-
-
 def _dump(qa: list[QAItem]) -> str:
     return json.dumps([dataclasses.asdict(it) for it in qa], ensure_ascii=False, indent=2)
 
@@ -493,14 +481,11 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
             syn_config.setup_models(models=models)
 
             records = main.doc(syn_config.doc_id).records
-            # The full record universe, before the where filter -- so source_id can
-            # reverse-look-up its ref full text and refs can expand to neighbours later.
+            # The full record universe -- so source_id can reverse-look-up its ref full
+            # text and refs can expand to neighbours later. `where` is no longer a
+            # synthesis-side pre-filter: it rides in sampling_kwargs and is applied
+            # per-unit inside the sampler (after pages / sections are built).
             artifact.write_records(syn_config.doc_id, records)
-            # pop, not read: `where` is a synthesis-side filter, not a Sampler param,
-            # so it must leave sampling_kwargs before the **splat into _sample.
-            where = syn_config.sampling_kwargs.pop("where", None)
-            if where:
-                records = [r for r in records if _match(r, where)]
             sampler = Sampler(records, syn_config.doc_id)
             samples = _sample(sampler, syn_config.sampler, **syn_config.sampling_kwargs)
             # The sampled subset that actually fed generation -- the draw's audit trail.

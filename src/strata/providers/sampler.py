@@ -80,13 +80,29 @@ def _draw_count(total: int, k: Optional[int], fraction: Optional[float], capped:
     return total
 
 
+def _match(record: ChunkRecord, where: dict) -> bool:
+    # A record passes when every attr satisfies its condition: membership for a
+    # list/set value, equality otherwise.
+    for attr, cond in where.items():
+        val = getattr(record, attr)
+        ok = val in cond if isinstance(cond, (list, set)) else val == cond
+        if not ok:
+            return False
+    return True
+
+
 def _draw(units: list[Unit], k: Optional[int] = None, fraction: Optional[float] = None,
           key: Optional[Callable[[Unit], object]] = None, with_replacement: bool = False,
-          seed: Optional[int] = None) -> list[Unit]:
-    # The one draw shared by every mode. Stratify by `key` (None = one global pool),
-    # then per stratum k / fraction apply. Without replacement: a capped subset,
-    # returned in the units' original (document) order. With replacement: an uncapped,
-    # possibly-repeating bootstrap, returned in draw order.
+          where: Optional[dict] = None, seed: Optional[int] = None) -> list[Unit]:
+    # The one draw shared by every mode. `where` filters each unit's records *after* the
+    # unit is built (so a section's tree is intact first), dropping units left empty --
+    # for a one-record chunk unit that is plain eligibility, for a page / section it keeps
+    # only the matching content. Then stratify by `key` (None = one global pool), and per
+    # stratum k / fraction apply. Without replacement: a capped subset, returned in the
+    # units' original (document) order. With replacement: an uncapped, possibly-repeating
+    # bootstrap, returned in draw order.
+    if where is not None:
+        units = [Unit(u.key, kept) for u in units if (kept := [r for r in u.records if _match(r, where)])]
     rng = random.Random(seed)
     strata = _stratify(units, key)
 
@@ -130,49 +146,54 @@ class Sampler:
         sections = iter_sections(self.records) if level is _TOP_LEVEL_SECTIONS else iter_sections_by_level(self.records, level)
         return [Unit(sec[0].bbox_id, sec) for sec in sections]
 
-    def sample_chunks(self, k: Optional[int] = None, fraction: Optional[float] = None, key: Optional[Callable[[ChunkRecord], object]] = None, seed: Optional[int] = None) -> list[ChunkRecord]:
+    def sample_chunks(self, k: Optional[int] = None, fraction: Optional[float] = None, key: Optional[Callable[[ChunkRecord], object]] = None, where: Optional[dict] = None, seed: Optional[int] = None) -> list[ChunkRecord]:
         # Chunk sampling without replacement. With `key`, k / fraction apply *per
         # stratum* -- "one chunk per page" is k=1, key=page; "two per kind" is k=2,
-        # key=kind. Without `key`, they apply to the whole pool. Output is deduped
-        # and kept in reading order.
+        # key=kind. Without `key`, they apply to the whole pool. `where` keeps only
+        # matching records as eligible. Output is deduped and kept in reading order.
         ukey = (lambda u: key(u.records[0])) if key else None
-        drawn = _draw(self._chunk_units(), k, fraction, ukey, seed=seed)
+        drawn = _draw(self._chunk_units(), k, fraction, ukey, where=where, seed=seed)
         return [u.records[0] for u in drawn]
 
-    def sample_pages(self, k: Optional[int] = None, fraction: Optional[float] = None, seed: Optional[int] = None) -> list[PageSample]:
+    def sample_pages(self, k: Optional[int] = None, fraction: Optional[float] = None, where: Optional[dict] = None, seed: Optional[int] = None) -> list[PageSample]:
         # Whole-page sampling without replacement: pick a subset of pages, return each
-        # with all its records. Output stays in page order.
-        drawn = _draw(self._page_units(), k, fraction, seed=seed)
+        # with all its records. `where` keeps only matching records within each page,
+        # dropping pages left empty. Output stays in page order.
+        drawn = _draw(self._page_units(), k, fraction, where=where, seed=seed)
         return [PageSample(page_idx=u.key, records=u.records) for u in drawn]
 
-    def sample_sections(self, k: Optional[int] = None, fraction: Optional[float] = None, level=_TOP_LEVEL_SECTIONS, seed: Optional[int] = None) -> list[SectionSample]:
+    def sample_sections(self, k: Optional[int] = None, fraction: Optional[float] = None, level=_TOP_LEVEL_SECTIONS, where: Optional[dict] = None, seed: Optional[int] = None) -> list[SectionSample]:
         # Whole-section sampling without replacement: project the records into sections
         # (each a title plus its subtree), pick a subset, and return each whole. Output
-        # stays in document order. The section is the unit -- like sample_pages, nothing
-        # inside a drawn section is dropped. `level` selects the projection (see
-        # _section_units).
-        drawn = _draw(self._section_units(level), k, fraction, seed=seed)
+        # stays in document order. `level` selects the projection (see _section_units).
+        # `where` keeps only matching records within each section (the tree is built from
+        # the full records first, so filtering content never breaks sectioning), dropping
+        # sections left empty.
+        drawn = _draw(self._section_units(level), k, fraction, where=where, seed=seed)
         return [SectionSample(key=u.key, records=u.records) for u in drawn]
 
-    def sample_chunks_with_replacement(self, k: Optional[int] = None, fraction: Optional[float] = None, key: Optional[Callable[[ChunkRecord], object]] = None, seed: Optional[int] = None) -> list[ChunkRecord]:
+    def sample_chunks_with_replacement(self, k: Optional[int] = None, fraction: Optional[float] = None, key: Optional[Callable[[ChunkRecord], object]] = None, where: Optional[dict] = None, seed: Optional[int] = None) -> list[ChunkRecord]:
         # Chunk bootstrap: within each stratum a record can be picked more than once.
         # Output is in draw order and may repeat, so it skips the dedup / reading-order
-        # pass of sample_chunks. k / fraction are uncapped (None = stratum size).
+        # pass of sample_chunks. `where` keeps only matching records as eligible. k /
+        # fraction are uncapped (None = stratum size).
         ukey = (lambda u: key(u.records[0])) if key else None
-        drawn = _draw(self._chunk_units(), k, fraction, ukey, with_replacement=True, seed=seed)
+        drawn = _draw(self._chunk_units(), k, fraction, ukey, with_replacement=True, where=where, seed=seed)
         return [u.records[0] for u in drawn]
 
-    def sample_pages_with_replacement(self, k: Optional[int] = None, fraction: Optional[float] = None, seed: Optional[int] = None) -> list[PageSample]:
-        # Whole-page bootstrap: the same page can be drawn more than once. Output is
-        # in draw order and may repeat. k / fraction are uncapped (None = pool size).
-        drawn = _draw(self._page_units(), k, fraction, with_replacement=True, seed=seed)
+    def sample_pages_with_replacement(self, k: Optional[int] = None, fraction: Optional[float] = None, where: Optional[dict] = None, seed: Optional[int] = None) -> list[PageSample]:
+        # Whole-page bootstrap: the same page can be drawn more than once. Output is in
+        # draw order and may repeat. `where` keeps only matching records within each page,
+        # dropping pages left empty. k / fraction are uncapped (None = pool size).
+        drawn = _draw(self._page_units(), k, fraction, with_replacement=True, where=where, seed=seed)
         return [PageSample(page_idx=u.key, records=u.records) for u in drawn]
 
-    def sample_sections_with_replacement(self, k: Optional[int] = None, fraction: Optional[float] = None, level=_TOP_LEVEL_SECTIONS, seed: Optional[int] = None) -> list[SectionSample]:
+    def sample_sections_with_replacement(self, k: Optional[int] = None, fraction: Optional[float] = None, level=_TOP_LEVEL_SECTIONS, where: Optional[dict] = None, seed: Optional[int] = None) -> list[SectionSample]:
         # Whole-section bootstrap: the same section can be drawn more than once. Output
         # is in draw order and may repeat. k / fraction are uncapped (None = pool size).
-        # `level` selects the projection, as in sample_sections.
-        drawn = _draw(self._section_units(level), k, fraction, with_replacement=True, seed=seed)
+        # `level` selects the projection and `where` filters section content, as in
+        # sample_sections.
+        drawn = _draw(self._section_units(level), k, fraction, with_replacement=True, where=where, seed=seed)
         return [SectionSample(key=u.key, records=u.records) for u in drawn]
 
     PAGE_BASED_SAMPLING = {
