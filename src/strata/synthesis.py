@@ -73,6 +73,7 @@ class SynthesisConfig:
     answer_overlap: Optional[float] = 0.6   # 3a threshold; None disables the check
     bare_overlap: Optional[float] = 0.6     # 3b threshold; None disables the check (and its LLM call)
     min_signal: Optional[str] = None   # drop units the synthesizer rates below this signal; None keeps all
+    per_unit: int = 1   # independent synthesis calls per unit, each producing one QA
     cap: Optional[int] = None   # hard ceiling on qualified survivors; stop early once hit
 
     def setup_models(self, models:dict):
@@ -192,11 +193,13 @@ class Synthesizer:
         bare_overlap: Optional[float] = 0.6,
         min_signal: Optional[str] = None,
         custom_instruction: Optional[str] = None,
+        per_unit: int = 1,
         on_step: Optional[Callable[[QAItem], None]] = None,
         concurrency: int = 8,
         cap: Optional[int] = None,
     ) -> list[QAItem]:
-        # Generate one QA per sampled unit, qualify each, keep the survivors: the answer
+        # Generate per_unit QA per sampled unit (each its own LLM call), qualify each, keep
+        # the survivors: the answer
         # must be in the unit (3a) and the question must not be answerable without the
         # document (3b). Units run concurrently up to `concurrency` -- generate->qualify
         # stays sequential per unit (qualify needs the generated question), but distinct
@@ -213,27 +216,36 @@ class Synthesizer:
         sem = asyncio.Semaphore(concurrency)
         kept = []
 
-        async def process(unit: Unit) -> QAItem:
+        async def process(unit: Unit) -> list[QAItem]:
             async with sem:
-                item = await self._generate(unit, synthesis_kwargs, custom_instruction)
-                await self._qualify(
-                    item,
-                    unit,
-                    qualifier_kwargs,
-                    answer_overlap=answer_overlap,
-                    bare_overlap=bare_overlap,
-                )
-            return item
+                items = []
+                for _ in range(per_unit):
+                    item = await self._generate(unit, synthesis_kwargs, custom_instruction)
+                    await self._qualify(
+                        item,
+                        unit,
+                        qualifier_kwargs,
+                        answer_overlap=answer_overlap,
+                        bare_overlap=bare_overlap,
+                    )
+                    items.append(item)
+            return items
 
         tasks = [asyncio.create_task(process(unit)) for unit in samples]
         try:
+            done = False
             for future in asyncio.as_completed(tasks):
-                item = await future
-                if _is_qualified(item, min_signal):
-                    kept.append(item)
-                if on_step is not None:
-                    on_step(item)
-                if cap is not None and len(kept) >= cap:
+                # A unit yields per_unit items; drain one at a time so on_step never
+                # interleaves and cap can stop mid-unit.
+                for item in await future:
+                    if _is_qualified(item, min_signal):
+                        kept.append(item)
+                    if on_step is not None:
+                        on_step(item)
+                    if cap is not None and len(kept) >= cap:
+                        done = True
+                        break
+                if done:
                     break
         finally:
             # Cancel the rest (no-op for already-finished tasks) and swallow the
@@ -487,6 +499,7 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
                 bare_overlap=syn_config.bare_overlap,
                 min_signal=syn_config.min_signal,
                 custom_instruction=syn_config.custom_instruction,
+                per_unit=syn_config.per_unit,
                 on_step=on_step,
                 concurrency=args.concurrency,
                 cap=syn_config.cap,
