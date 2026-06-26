@@ -50,6 +50,11 @@ def cmd_read_page(args) -> int:
     return 0
 
 
+def cmd_read_section(args) -> int:
+    _dump(_open(args.source).read_section(args.bbox_id, embed_images=args.embed_images))
+    return 0
+
+
 def cmd_list_docs(args) -> int:
     main = Main()
     main.open(args.source)
@@ -130,6 +135,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_pinfo = subparsers.add_parser("page-info", parents=[source], help="Page size, label counts, block ids")
     p_pinfo.add_argument("page_idx", type=int, help="0-based page index")
     p_pinfo.set_defaults(func=cmd_page_info)
+
+    p_section = subparsers.add_parser("read-section", parents=[source, block], help="A title and its subtree as ordered regions")
+    p_section.add_argument("--embed-images", action="store_true", help="Inline image bytes as base64 data uris")
+    p_section.set_defaults(func=cmd_read_section)
 
     p_ctx = subparsers.add_parser("context", parents=[source, block], help="A block plus its neighbours")
     p_ctx.add_argument("--n-prev", type=int, default=1, help="Preceding blocks to include")

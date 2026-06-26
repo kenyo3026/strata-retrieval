@@ -112,6 +112,10 @@ def create_app(sources: Optional[list[str]] = None, checkpoint_root: Optional[st
     def page_info(doc_id: str, page_idx: int):
         return _dump(_doc(doc_id).page_info(page_idx))
 
+    @app.get("/docs/{doc_id}/sections/{bbox_id}")
+    def read_section(doc_id: str, bbox_id: str, embed_images: bool = False):
+        return _resolve(bbox_id, lambda: _doc(doc_id).read_section(bbox_id, embed_images=embed_images))
+
     for source in sources or []:
         main.open(source)
 

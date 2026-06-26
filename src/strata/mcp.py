@@ -160,6 +160,36 @@ def create_mcp_server() -> FastMCP:
         )
 
     @mcp.tool
+    def read_section(doc_id: str, bbox_id: str, embed_images: bool = False) -> ToolResult:
+        """A title and its whole subtree as ordered per-kind regions -- the section
+        peer of read_page, keyed by a title block.
+
+        Default: the structured payload (image regions are placeholders). With
+        embed_images: the same payload as structured_content, plus reading-order
+        content blocks where each image is a real ImageContent the model can see.
+        """
+        doc = _doc(doc_id)
+        if not embed_images:
+            payload = _resolve(bbox_id, lambda: doc.read_section(bbox_id))
+            return ToolResult(
+                content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, indent=2))],
+                structured_content=payload,
+            )
+
+        placeholders = _resolve(bbox_id, lambda: doc.read_section(bbox_id))  # also validates bbox_id
+        blocks = []
+        for region in doc.read_section(bbox_id, embed_images=True).regions:
+            if region.kind == RegionKind.IMAGE:
+                caption = f": {region.caption}" if region.caption else ""
+                blocks.append(TextContent(type="text", text=f"[image {region.bbox_id}]{caption}"))
+                if region.content:
+                    mime, data = _data_uri_parts(region.content)
+                    blocks.append(ImageContent(type="image", data=data, mimeType=mime))
+            elif region.content:
+                blocks.append(TextContent(type="text", text=region.content))
+        return ToolResult(content=blocks, structured_content=placeholders)
+
+    @mcp.tool
     def context(doc_id: str, bbox_id: str, n_prev: int = 1, n_next: int = 1) -> ToolResult:
         """A block plus its n_prev/n_next reading-order neighbours."""
         payload = _resolve(bbox_id, lambda: _doc(doc_id).read_block_with_context(bbox_id, n_prev=n_prev, n_next=n_next))
