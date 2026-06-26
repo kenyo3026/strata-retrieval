@@ -25,6 +25,11 @@ Judge the signal first; it conditions the question you then write. Always still 
 one question and answer, even when the signal is low.
 </signal>
 
+<language>
+Write the question and answer in the same language as the passage. If a custom
+instruction above specifies a language, follow that instead.
+</language>
+
 <question_rubric>
 A strong question is:
 - Goal-situated: it comes from someone pursuing a concrete goal with this content --
