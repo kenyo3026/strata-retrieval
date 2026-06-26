@@ -400,7 +400,12 @@ def main() -> int:
     payload = json.dumps([dataclasses.asdict(it) for it in qa], ensure_ascii=False, indent=2)
     if args.out:
         out = pathlib.Path(args.out)
-        out_file = out / f"{NameWithLazyDatetime(prefix='out')}.json" if out.is_dir() else out
+        if out.suffix:
+            out_file = out
+        else:
+            out.mkdir(parents=True, exist_ok=True)
+            out_file = out / f"{NameWithLazyDatetime(prefix='out')}.json"
+
         pathlib.Path(out_file).write_text(payload, encoding="utf-8")
         print(f"wrote {len(qa)} QA items -> {out_file}")
     
