@@ -68,6 +68,7 @@ class SynthesisConfig:
     qualifier_model: str
     sampler: str
     sampling_kwargs: dict = field(default_factory = dict)
+    cap: Optional[int] = None   # hard ceiling on qualified survivors; stop early once hit
 
     def setup_models(self, models:dict):
         self.setup_synthesis_model(models)
@@ -179,6 +180,7 @@ class Synthesizer:
         bare_overlap: float = 0.6,
         on_step: Optional[Callable[[QAItem], None]] = None,
         concurrency: int = 8,
+        cap: Optional[int] = None,
     ) -> list[QAItem]:
         # Generate one QA per sampled chunk, qualify each, keep the survivors: the
         # answer must be in the chunk (3a) and the question must not be answerable
@@ -186,14 +188,18 @@ class Synthesizer:
         # generate->qualify stays sequential per record (qualify needs the generated
         # question), but distinct records overlap, so latency-bound LLM calls amortize.
         #
-        # on_step fires once per record (after both LLM calls) so the caller can report
-        # progress; it sees every item, kept or not. It is called synchronously and must
-        # not await -- on a single event loop that makes it atomic, so a caller may
-        # append / write from it without a lock. Items arrive in completion order.
+        # cap is a hard ceiling on survivors: once `cap` are kept we stop draining and
+        # cancel every still-running / not-yet-started record, so the run ends without
+        # paying for the rest of the samples -- regardless of how many were drawn.
+        #
+        # on_step fires once per completed record so the caller can report progress; it
+        # sees every drained item, kept or not. Results are drained one at a time in this
+        # single coroutine, so on_step never interleaves -- a caller may append / write
+        # from it without a lock. Items arrive in completion order.
         sem = asyncio.Semaphore(concurrency)
         kept = []
 
-        async def process(record: ChunkRecord) -> None:
+        async def process(record: ChunkRecord) -> QAItem:
             async with sem:
                 item = await self._generate(record, synthesis_kwargs)
                 await self._qualify(
@@ -203,12 +209,24 @@ class Synthesizer:
                     answer_overlap=answer_overlap,
                     bare_overlap=bare_overlap,
                 )
-            if item.answer_in_chunk and not item.answerable_without_doc:
-                kept.append(item)
-            if on_step is not None:
-                on_step(item)
+            return item
 
-        await asyncio.gather(*(process(record) for record in samples))
+        tasks = [asyncio.create_task(process(record)) for record in samples]
+        try:
+            for future in asyncio.as_completed(tasks):
+                item = await future
+                if item.answer_in_chunk and not item.answerable_without_doc:
+                    kept.append(item)
+                if on_step is not None:
+                    on_step(item)
+                if cap is not None and len(kept) >= cap:
+                    break
+        finally:
+            # Cancel the rest (no-op for already-finished tasks) and swallow the
+            # resulting CancelledErrors so a capped run exits cleanly.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         return kept
 
     async def _generate(self, record: ChunkRecord, synthesis_kwargs:dict={}) -> QAItem:
@@ -426,7 +444,6 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
 
     qa: list[QAItem] = []     # qualification survivors -> dataset.json
     raw: list[QAItem] = []    # every generated item -> dataset.raw.json
-    generated = 0
     specs = config_morpher.fetch("synthesis", [])
     progress = Progress(
         SpinnerColumn(),
@@ -456,7 +473,6 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
             samples = _sample(sampler, syn_config.sampler, **syn_config.sampling_kwargs)
             # The sampled subset that actually fed generation -- the draw's audit trail.
             artifact.write_sample_records(syn_config.doc_id, samples)
-            generated += len(samples)
 
             task = progress.add_task(syn_config.doc_id, total=len(samples), kept=0)
             seen = {"kept": 0}
@@ -482,6 +498,7 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
                 syn_config.qualifier_model,
                 on_step=on_step,
                 concurrency=args.concurrency,
+                cap=syn_config.cap,
             )
 
     # Final flush so both files exist even when nothing was generated / kept.
@@ -489,7 +506,7 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
     artifact.write_dataset(qa)
 
     if args.verbose:
-        console.print(f"[green]done[/] generated {generated}, kept {len(qa)} across {len(specs)} docs -> {artifact}")
+        console.print(f"[green]done[/] generated {len(raw)}, kept {len(qa)} across {len(specs)} docs -> {artifact}")
 
     return qa
 
