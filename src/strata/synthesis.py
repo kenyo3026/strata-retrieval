@@ -290,6 +290,21 @@ def _match(record: ChunkRecord, where: dict) -> bool:
     return True
 
 
+def _resolve_out_file(out: str) -> pathlib.Path:
+    # A path with a suffix is the target file; a bare directory (or one not yet
+    # created) gets a timestamped filename. Parent is ensured either way.
+    path = pathlib.Path(out)
+    if path.suffix:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+    path.mkdir(parents=True, exist_ok=True)
+    return path / f"{NameWithLazyDatetime(prefix='out')}.json"
+
+
+def _dump(qa: list[QAItem]) -> str:
+    return json.dumps([dataclasses.asdict(it) for it in qa], ensure_ascii=False, indent=2)
+
+
 def _sample(sampler: Sampler, mode: str, **kwargs) -> list[ChunkRecord]:
     # # Dispatch a sampling spec to the matching Sampler method. `key` is a record
     # # attribute name turned into the accessor Sampler expects, and applies only to
@@ -322,9 +337,13 @@ def synthesize(args: SynthesisArgs) -> list[QAItem]:
 
     With args.verbose, a rich progress view is rendered to stderr (a per-doc bar
     that ticks once per record with a live kept count), leaving stdout clean for
-    the JSON payload. Without it, the run is silent."""
+    the JSON payload. Without it, the run is silent.
+
+    When args.out is set the file is rewritten after every kept item, so a long
+    run is observable and survivable mid-flight rather than landing only at the end."""
     # stderr so the JSON on stdout stays pipe-clean; disabled => the bar no-ops.
     console = Console(stderr=True)
+    out_file = _resolve_out_file(args.out) if args.out else None
 
     main = Main(args.checkpoint)
     for source in args.source or []:
@@ -369,21 +388,31 @@ def synthesize(args: SynthesisArgs) -> list[QAItem]:
             task = progress.add_task(syn_config.doc_id, total=len(samples), kept=0)
             seen = {"kept": 0}
 
+            # on_step accumulates kept items into qa and flushes the file each time,
+            # so accumulation lives here (not via run's return) to keep one writer.
             def on_step(item: QAItem, task=task, seen=seen) -> None:
                 if item.answer_in_chunk and not item.answerable_without_doc:
                     seen["kept"] += 1
+                    qa.append(item)
+                    if out_file is not None:
+                        out_file.write_text(_dump(qa), encoding="utf-8")
                 progress.update(task, advance=1, kept=seen["kept"])
 
             synthesizer = Synthesizer()
-            qa.extend(synthesizer.run(
+            synthesizer.run(
                 samples,
                 syn_config.synthesis_model,
                 syn_config.qualifier_model,
                 on_step=on_step,
-            ))
+            )
+
+    # Final flush so the file exists even when nothing was kept.
+    if out_file is not None:
+        out_file.write_text(_dump(qa), encoding="utf-8")
 
     if args.verbose:
-        console.print(f"[green]done[/] generated {generated}, kept {len(qa)} across {len(specs)} docs")
+        tail = f" -> {out_file}" if out_file is not None else ""
+        console.print(f"[green]done[/] generated {generated}, kept {len(qa)} across {len(specs)} docs{tail}")
 
     return qa
 
@@ -397,20 +426,10 @@ def main() -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
-    payload = json.dumps([dataclasses.asdict(it) for it in qa], ensure_ascii=False, indent=2)
-    if args.out:
-        out = pathlib.Path(args.out)
-        if out.suffix:
-            out_file = out
-        else:
-            out.mkdir(parents=True, exist_ok=True)
-            out_file = out / f"{NameWithLazyDatetime(prefix='out')}.json"
-
-        pathlib.Path(out_file).write_text(payload, encoding="utf-8")
-        print(f"wrote {len(qa)} QA items -> {out_file}")
-    
+    # synthesize() owns the file (written incrementally); stdout just mirrors the
+    # final payload when verbose.
     if args.verbose:
-        print(payload)
+        print(_dump(qa))
 
     return 0
 
