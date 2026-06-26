@@ -20,6 +20,7 @@ Synthesizer is a records-in consumer parallel to Sampler/Document. Opening the d
 """
 
 import argparse
+import asyncio
 import dataclasses
 import json
 import logging
@@ -164,9 +165,10 @@ class Synthesizer:
         self.answer_overlap = answer_overlap
         self.bare_overlap = bare_overlap
 
-        self._client = instructor.from_litellm(litellm.completion)
+        # acompletion -> instructor returns an AsyncInstructor; create() is awaitable.
+        self._client = instructor.from_litellm(litellm.acompletion)
 
-    def run(
+    async def run(
         self,
         samples: list[ChunkRecord],
         synthesis_kwargs:dict={},
@@ -174,29 +176,41 @@ class Synthesizer:
         answer_overlap: float = 0.6,
         bare_overlap: float = 0.6,
         on_step: Optional[Callable[[QAItem], None]] = None,
+        concurrency: int = 8,
     ) -> list[QAItem]:
         # Generate one QA per sampled chunk, qualify each, keep the survivors: the
         # answer must be in the chunk (3a) and the question must not be answerable
-        # without the document (3b). on_step fires once per record (after both LLM
-        # calls) so the caller can report progress; it sees every item, kept or not.
+        # without the document (3b). Records run concurrently up to `concurrency` --
+        # generate->qualify stays sequential per record (qualify needs the generated
+        # question), but distinct records overlap, so latency-bound LLM calls amortize.
+        #
+        # on_step fires once per record (after both LLM calls) so the caller can report
+        # progress; it sees every item, kept or not. It is called synchronously and must
+        # not await -- on a single event loop that makes it atomic, so a caller may
+        # append / write from it without a lock. Items arrive in completion order.
+        sem = asyncio.Semaphore(concurrency)
         kept = []
-        for record in samples:
-            item = self._generate(record, synthesis_kwargs)
-            self._qualify(
-                item,
-                record,
-                qualifier_kwargs,
-                answer_overlap=answer_overlap,
-                bare_overlap=bare_overlap,
-            )
+
+        async def process(record: ChunkRecord) -> None:
+            async with sem:
+                item = await self._generate(record, synthesis_kwargs)
+                await self._qualify(
+                    item,
+                    record,
+                    qualifier_kwargs,
+                    answer_overlap=answer_overlap,
+                    bare_overlap=bare_overlap,
+                )
             if item.answer_in_chunk and not item.answerable_without_doc:
                 kept.append(item)
             if on_step is not None:
                 on_step(item)
+
+        await asyncio.gather(*(process(record) for record in samples))
         return kept
 
-    def _generate(self, record: ChunkRecord, synthesis_kwargs:dict={}) -> QAItem:
-        resp = self._client.chat.completions.create(
+    async def _generate(self, record: ChunkRecord, synthesis_kwargs:dict={}) -> QAItem:
+        resp = await self._client.chat.completions.create(
             **synthesis_kwargs,
             response_model=_QAResponse,
             messages=_QAResponse.build_messages(_chunk_text(record)),
@@ -208,7 +222,7 @@ class Synthesizer:
             doc_id=record.doc_id,
         )
 
-    def _qualify(
+    async def _qualify(
         self,
         item: QAItem,
         record: ChunkRecord,
@@ -225,11 +239,11 @@ class Synthesizer:
 
         # 3b: behavioural -- let the model answer the question with no document; if its
         # bare answer matches the gold answer, the question doesn't exercise retrieval.
-        bare = self._bare_answer(item.question, qualifier_kwargs)
+        bare = await self._bare_answer(item.question, qualifier_kwargs)
         item.answerable_without_doc = _overlap(bare, item.answer) >= bare_overlap
 
-    def _bare_answer(self, question: str, qualifier_kwargs:dict={}) -> str:
-        resp = litellm.completion(
+    async def _bare_answer(self, question: str, qualifier_kwargs:dict={}) -> str:
+        resp = await litellm.acompletion(
             **qualifier_kwargs,
             messages=[
                 {"role": "system", "content": _BARE_SYSTEM},
@@ -248,6 +262,7 @@ class SynthesisArgs:
     source          : Optional[list] = None
     checkpoint      : str = str(DEFAULT_CHECKPOINT_ROOT)
     out             : str = str(DEFAULT_OUTPUT_DIR)
+    concurrency     : int = 8
     verbose         : bool = True
     log_level       : str = "ERROR"
 
@@ -273,6 +288,7 @@ class SynthesisArgs:
             help="Persist opened docs here; reuse the same dir to inherit them on restart.",
         )
         parser.add_argument("-o", "--out", default=self.out, help="Write the QA set as JSON here")
+        parser.add_argument("--concurrency", type=int, default=self.concurrency, help="Max records processed concurrently (in-flight LLM pipelines)")
         parser.add_argument("--no-verbose", dest="verbose", action="store_false", default=self.verbose, help="Silence the full-payload print to stdout")
         parser.add_argument("--log-level", default=self.log_level, choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level; default ERROR hides LiteLLM warnings")
         return parser
@@ -329,7 +345,7 @@ def _sample(sampler: Sampler, mode: str, **kwargs) -> list[ChunkRecord]:
     return samples
 
 
-def synthesize(args: SynthesisArgs) -> list[QAItem]:
+async def synthesize(args: SynthesisArgs) -> list[QAItem]:
     """Open the sources into the checkpoint, then for each sampling spec in the
     config: sample, generate, and qualify. The spec list -- which doc, draw mode,
     count, stratification key, and generator model -- lives in config.yaml; the
@@ -390,6 +406,8 @@ def synthesize(args: SynthesisArgs) -> list[QAItem]:
 
             # on_step accumulates kept items into qa and flushes the file each time,
             # so accumulation lives here (not via run's return) to keep one writer.
+            # run calls it synchronously with no await between, so even under concurrent
+            # records it never interleaves -- no lock needed. qa is in completion order.
             def on_step(item: QAItem, task=task, seen=seen) -> None:
                 if item.answer_in_chunk and not item.answerable_without_doc:
                     seen["kept"] += 1
@@ -399,11 +417,12 @@ def synthesize(args: SynthesisArgs) -> list[QAItem]:
                 progress.update(task, advance=1, kept=seen["kept"])
 
             synthesizer = Synthesizer()
-            synthesizer.run(
+            await synthesizer.run(
                 samples,
                 syn_config.synthesis_model,
                 syn_config.qualifier_model,
                 on_step=on_step,
+                concurrency=args.concurrency,
             )
 
     # Final flush so the file exists even when nothing was kept.
@@ -421,7 +440,7 @@ def main() -> int:
     args = SynthesisArgs.from_args()
     logging.getLogger("LiteLLM").setLevel(args.log_level)
     try:
-        qa = synthesize(args)
+        qa = asyncio.run(synthesize(args))
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
