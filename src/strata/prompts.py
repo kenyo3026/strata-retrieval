@@ -24,10 +24,13 @@ A strong question is:
 - Natural: phrased in plain, fluent language.
 
 A strong answer is:
-- Directly responsive: it answers the question and nothing else.
+- Complete: it covers every distinct point in the passage that the question calls for
+  -- each relevant condition, step, exception, threshold, or cause -- leaving out
+  nothing the question asks about.
+- Bounded: it answers the question and only the question -- no background, no
+  restating, no detail the question did not ask for.
 - Faithful: every claim is supported by the passage; it may paraphrase but must not
   add facts the passage does not state.
-- Concise: a focused factual statement, not a copied block of text.
 </question_rubric>
 
 <prohibitions>
