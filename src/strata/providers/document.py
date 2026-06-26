@@ -86,6 +86,20 @@ class PagePayload:
 
 
 @dataclass
+class SectionPayload:
+    """A section as one delivery unit -- the section-level peer of PagePayload: a
+    section header (title + heading level) plus its regions in reading order, each
+    shaped per its kind. A section spans whatever pages it covers, so it carries no
+    single page_size. The leading title-less run reports title=None / level=None,
+    keyed by its first block."""
+    doc_id  : Optional[str]
+    bbox_id : str
+    title   : Optional[str]
+    level   : Optional[int]
+    regions : list
+
+
+@dataclass
 class PageInfo:
     page_idx        : int
     page_size       : Optional[list]
@@ -194,6 +208,11 @@ class Document:
             if r.parent_bbox_id is not None:
                 self._by_parent[r.parent_bbox_id].append(r.bbox_id)
         self._section_children = build_section_tree(self.records)  # title bbox_id -> direct child ids
+        self._preamble = []                    # leading title-less run, addressable as a section by its first block
+        for rid in self._section_children.get(None, []):
+            if "title" in self._by_id[rid].label:
+                break
+            self._preamble.append(rid)
 
     def summary(self) -> DocSummary:
         return DocSummary(
@@ -230,6 +249,27 @@ class Document:
         mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
         data = base64.b64encode(path.read_bytes()).decode("ascii")
         return replace(region, content=f"data:{mime};base64,{data}")
+
+    def read_section(self, bbox_id: str, embed_images: bool = False) -> SectionPayload:
+        # A section as one delivery unit -- the section-level peer of read_page:
+        # same per-kind region assembly, same optional image embedding, just keyed
+        # by a title block (its whole subtree) instead of a page index. The leading
+        # title-less run is addressed by its first block. Spans pages, no page_size.
+        if embed_images and self.artifact_root is None:
+            raise ValueError("read_section(embed_images=True) requires the document to be opened with an artifact_root")
+        records = self.section(bbox_id)
+        regions = _assemble_regions(records)
+        if embed_images:
+            regions = [self._embed(r) if isinstance(r, ImageRegion) else r for r in regions]
+        head = self._by_id[bbox_id]
+        is_title = "title" in head.label
+        return SectionPayload(
+            doc_id=self.doc_id,
+            bbox_id=bbox_id,
+            title=head.content if is_title else None,
+            level=head.level if is_title else None,
+            regions=regions,
+        )
 
     def read_block_with_context(self, bbox_id: str, n_prev: int = 1, n_next: int = 1) -> list[ChunkRecord]:
         # The block plus its n_prev/n_next reading-order neighbours, in order.
@@ -321,7 +361,10 @@ class Document:
     def section(self, bbox_id: str) -> list[ChunkRecord]:
         # A title and its whole subtree (recursive descendants) in reading order:
         # the title, its body, and every nested subsection folded in. A non-title
-        # bbox_id yields just itself.
+        # bbox_id yields just itself, except the start of the leading title-less
+        # run, which yields that whole run.
+        if self._preamble and bbox_id == self._preamble[0]:
+            return [self._by_id[i] for i in self._preamble]
         out = [self._by_id[bbox_id]]
         stack = list(reversed(self._section_children.get(bbox_id, [])))
         while stack:
