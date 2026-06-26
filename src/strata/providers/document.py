@@ -13,7 +13,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from typing import Optional, Union
 
-from .record import ChunkRecord
+from .record import ChunkRecord, build_section_tree
 
 _SNIPPET_LEN = 80
 
@@ -193,6 +193,7 @@ class Document:
             self._position[r.bbox_id] = i
             if r.parent_bbox_id is not None:
                 self._by_parent[r.parent_bbox_id].append(r.bbox_id)
+        self._section_children = build_section_tree(self.records)  # title bbox_id -> direct child ids
 
     def summary(self) -> DocSummary:
         return DocSummary(
@@ -311,6 +312,23 @@ class Document:
         if parent_id is None:
             return []
         return [bid for bid in self._by_parent[parent_id] if bid != bbox_id]
+
+    def section_children(self, bbox_id: str) -> list[str]:
+        # Direct children under a title in reading order: its body blocks and the
+        # next-deeper subtitles. Non-title blocks own no section, so they get [].
+        return list(self._section_children.get(bbox_id, []))
+
+    def section(self, bbox_id: str) -> list[ChunkRecord]:
+        # A title and its whole subtree (recursive descendants) in reading order:
+        # the title, its body, and every nested subsection folded in. A non-title
+        # bbox_id yields just itself.
+        out = [self._by_id[bbox_id]]
+        stack = list(reversed(self._section_children.get(bbox_id, [])))
+        while stack:
+            child = stack.pop()
+            out.append(self._by_id[child])
+            stack.extend(reversed(self._section_children.get(child, [])))
+        return out
 
     def next(self, bbox_id: str) -> Optional[str]:
         pos = self._position[bbox_id] + 1

@@ -7,6 +7,7 @@ The standard vocabulary (RegionKind / role) that lets consumers stop sniffing a
 provider's open label strings will land here too.
 """
 
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
 
@@ -32,3 +33,35 @@ class ChunkRecord:
     level            : Optional[int]  = None  # heading level, titles only
     from_discarded   : bool = False
     sub_chunks       : Optional[list] = None
+
+
+def build_section_tree(records: list[ChunkRecord]) -> dict[Optional[str], list[str]]:
+    """Map each title's bbox_id to its direct children's bbox_ids in reading order.
+
+    A title owns everything after it up to the next title of equal-or-higher level;
+    a deeper title in between is itself a child and in turn owns its own children,
+    so the map forms a recursive tree. The `None` key holds the roots: top-level
+    titles plus any leading content before the first title. A title with no level
+    can't be ranked, so it closes everything open and attaches as a root.
+
+    The flat list stays the single source of truth -- this is a derived view over
+    it (not stored on the records), so Document (section navigation) and Sampler
+    (by-title draws) build on the same boundary rule without depending on each
+    other.
+    """
+    parent_of: dict[str, Optional[str]] = {}
+    stack: list[tuple[str, Optional[int]]] = []  # (title bbox_id, level) of open ancestors
+    for r in records:
+        if "title" in r.label:
+            level = r.level
+            while stack and (level is None or stack[-1][1] is None or stack[-1][1] >= level):
+                stack.pop()
+            parent_of[r.bbox_id] = stack[-1][0] if stack else None
+            stack.append((r.bbox_id, level))
+        else:
+            parent_of[r.bbox_id] = stack[-1][0] if stack else None
+
+    children: dict[Optional[str], list[str]] = defaultdict(list)
+    for r in records:                       # second pass keeps children in reading order
+        children[parent_of[r.bbox_id]].append(r.bbox_id)
+    return dict(children)
