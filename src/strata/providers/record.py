@@ -67,7 +67,7 @@ def build_section_tree(records: list[ChunkRecord]) -> dict[Optional[str], list[s
     return dict(children)
 
 
-def section_subtree(tree: dict[Optional[str], list[str]], root: str) -> list[str]:
+def traverse_subtree(tree: dict[Optional[str], list[str]], root: str) -> list[str]:
     """A section root's bbox_id plus all its descendants in reading order -- preorder
     over the tree, whose children are already in reading order."""
     out = [root]
@@ -92,7 +92,7 @@ def iter_sections(records: list[ChunkRecord]) -> list[list[ChunkRecord]]:
     preamble: list[ChunkRecord] = []
     for rid in tree.get(None, []):
         if "title" in by_id[rid].label:
-            sections.append([by_id[i] for i in section_subtree(tree, rid)])
+            sections.append([by_id[i] for i in traverse_subtree(tree, rid)])
         else:
             preamble.append(by_id[rid])   # leading run is contiguous at the front
     if preamble:
