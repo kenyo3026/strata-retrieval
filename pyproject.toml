@@ -52,6 +52,7 @@ strata = "strata.cli:main"
 strata-api = "strata.app:main"
 strata-mcp = "strata.mcp:main"
 strata-synthesis = "strata.synthesis:main"
+strata-prepare-evalset = "strata.evalset:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
