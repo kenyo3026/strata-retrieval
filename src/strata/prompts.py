@@ -4,7 +4,9 @@ with it, or working through something it speaks to. You are reading one passage
 extracted from a larger document and writing a single question-answer pair that
 captures something a real user would genuinely need answered while doing that, using
 only what the passage states.
+
 {custom_instructions}
+
 <task>
 First judge the passage's signal, then produce exactly one question and its answer,
 both grounded entirely in the passage. The question must read like something a real
@@ -99,4 +101,114 @@ CUSTOM_INSTRUCTIONS_BLOCK = '''
 <custom_instructions description="Optional per-run refinements -- e.g. the document's domain, audience, or focus. Follow them as intent; they refine, not replace, the rules below.">
 {custom_instruction}
 </custom_instructions>
+'''.strip()
+
+
+# The bare-answer probe -- stage one of qualification. The question is answered with no
+# passage in context (free-text completion, no structured output); its output is handed to
+# the judge as the evidence for the answerable_without_doc verdict.
+INSTRUCTION_FOR_BARE_ANSWER = '''
+You are answering a single question using only your own general knowledge. You have NOT
+been given any document, passage, or source -- you receive the question and nothing else.
+Your answer is a probe: it will be used to test whether the question can be answered
+without the document, so it must reflect what you genuinely know, not a guess dressed up
+as fact.
+
+<task>
+Read the question and answer it directly from what you already know. You are not being
+asked to reason about a hidden source or to infer what some document might say -- only to
+state what you actually know about the question itself.
+</task>
+
+<how_to_answer>
+- Answer concisely: the substance of the answer, no preamble, no restating the question.
+- Use only your own knowledge. There is no document to draw on, and none is implied.
+- Be honest about the limits of your knowledge. If you do not know, or only know a vague
+  or generic version, say plainly that you do not know -- do not manufacture specific
+  facts, numbers, names, or steps to fill the gap.
+- Do not hedge a real answer into a non-answer, and do not inflate a non-answer into one
+  that sounds confident. The judge needs a truthful signal of what general knowledge alone
+  produces.
+</how_to_answer>
+
+<output_format>
+Plain text only -- either the concise answer, or a direct statement that you do not know.
+No labels, no formatting, no explanation of your process.
+</output_format>
+'''.strip()
+
+
+INSTRUCTION_FOR_QA_JUDGE = '''
+You are an independent judge evaluating one synthesized question-answer pair against the
+passage it was written from. You do not generate questions, you do not write answers, and
+you do not answer the question yourself. Your only job is to return two verdicts about the
+pair, each judged on meaning -- not on shared wording.
+
+{custom_instructions}
+
+<task>
+You receive four things:
+- Passage: the source text the pair was written from.
+- Question: the synthesized question.
+- Answer: the synthesized answer, meant to be grounded in the passage.
+- Bare answer: the same question answered by a model that was NOT shown the passage --
+  evidence of what general knowledge alone produces.
+
+Return exactly two verdicts, each as a boolean with a one-line reason:
+`answer_in_chunk` and `answerable_without_doc`. Judge each on what the texts mean, not on
+whether they reuse the same words.
+</task>
+
+<answer_in_chunk>
+Is the Answer actually supported by the Passage?
+- true: every claim in the Answer is stated by or directly follows from the Passage. A
+  faithful paraphrase, a translation into another language, a unit conversion, or a value
+  the Passage clearly implies all count as supported -- wording need not match.
+- false: the Answer asserts something the Passage does not state -- an added fact, a
+  number not present, an entity the Passage never mentions, or a claim that only looks
+  related because it shares words with the Passage.
+Judge meaning. Do not penalize an Answer for rephrasing the Passage, and do not pass an
+Answer just because it echoes the Passage's vocabulary.
+</answer_in_chunk>
+
+<answerable_without_doc>
+Does the question fail to require the document -- i.e. is it answerable from general
+knowledge alone? Decide this from the Bare answer, which is what a model produced with no
+access to the Passage.
+- true: the Bare answer already conveys the same substance as the Answer. The question is
+  answerable without the document, so it does not exercise retrieval -- it should be dropped.
+- false: the Bare answer misses, contradicts, hedges, or only partially covers the Answer
+  (e.g. says it does not know, or gives a generic reply). The question genuinely depends on
+  the document.
+Compare substance, not phrasing: a Bare answer worded differently but meaning the same as
+the Answer is still a match (true).
+</answerable_without_doc>
+
+<output_format>
+Return both fields. For each, write the reason first (a single sentence naming what you
+compared and why), then the boolean verdict it leads to:
+- answer_in_chunk_reason / answer_in_chunk
+- answerable_without_doc_reason / answerable_without_doc
+Do not add any field beyond these four.
+</output_format>
+
+<examples>
+These show the SHAPE of the judgment only; they are unrelated to the pair you receive.
+
+answer_in_chunk = true:
+  Passage says "the code expires 30 minutes after issue"; Answer says "you have half an
+  hour before it stops working." Different words, same fact -> supported.
+
+answer_in_chunk = false:
+  Passage lists steps to submit a batch; Answer states a specific approval SLA of 48 hours
+  the Passage never mentions -> an added fact, not supported.
+
+answerable_without_doc = true:
+  Question asks what HTTP 404 means; Bare answer correctly says "resource not found,"
+  matching the Answer -> general knowledge suffices, drop it.
+
+answerable_without_doc = false:
+  Question asks the retention period for this product's records; Bare answer says it does
+  not know the specific value -> the document is required, keep it.
+</examples>
 '''.strip()

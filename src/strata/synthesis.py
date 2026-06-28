@@ -6,8 +6,11 @@ generated *from* that chunk we already know which bbox_id should answer it -- th
 by-construction ground truth, no human labelling (see .prps/qa-synthesis.md).
 
 A manufactured ruler is only trustworthy once validated, so synthesis is two layers:
-generate, then qualify each item as a valid anchor (3a answer-in-chunk, deterministic;
-3b need-context, a behavioural LLM bare-answer test). Survivors are the test set.
+generate, then qualify each item with an LLM judge. Qualification is two sequential calls:
+first the question is bare-answered with no passage in context, then a single judge call
+sees {passage, question, answer, bare-answer} and returns both verdicts -- answer_in_chunk
+(answer supported by the unit) and answerable_without_doc (bare answer already covered it).
+Survivors are the test set.
 
 LLM access aligns with the eval project: litellm underneath, instructor wrapping it for
 structured output, models declared as named blocks in a config.yaml read via ConfigMorpher
@@ -26,7 +29,6 @@ import json
 import logging
 import pathlib
 import shutil
-import re
 import sys
 from dataclasses import dataclass, field, fields
 from datetime import datetime
@@ -47,7 +49,12 @@ from rich.progress import (
 )
 
 from .main import DEFAULT_CHECKPOINT_ROOT, Main
-from .prompts import CUSTOM_INSTRUCTIONS_BLOCK, INSTRUCTION_FOR_QA_SYNTHESIS
+from .prompts import (
+    CUSTOM_INSTRUCTIONS_BLOCK,
+    INSTRUCTION_FOR_BARE_ANSWER,
+    INSTRUCTION_FOR_QA_JUDGE,
+    INSTRUCTION_FOR_QA_SYNTHESIS,
+)
 from .providers.record import ChunkRecord
 from .providers.sampler import Sampler, Unit
 from .utils.mixin import NameWithLazyDatetime
@@ -70,8 +77,7 @@ class SynthesisConfig:
     sampler: str
     sampling_kwargs: dict = field(default_factory = dict)
     custom_instruction: Optional[str] = None   # per-run synthesis refinement; None omits the block
-    answer_overlap: Optional[float] = 0.6   # 3a threshold; None disables the check
-    bare_overlap: Optional[float] = 0.6     # 3b threshold; None disables the check (and its LLM call)
+    enable_qualifier: bool = True   # run the LLM judge qualification (bare-answer + one judge call); False keeps every generated item
     min_signal: Optional[str] = None   # drop units the synthesizer rates below this signal; None keeps all
     per_unit: int = 1   # independent synthesis calls per unit, each producing one QA
     cap: Optional[int] = None   # hard ceiling on qualified survivors; stop early once hit
@@ -95,14 +101,18 @@ class QAItem:
     the bbox_ids of every record that fed synthesis -- the by-construction retrieval
     ground truth: one id for a chunk unit, the whole span for a page / section unit.
     `signal` is the synthesizer's pre-QA rating of the source unit's worth; the two
-    verdicts are step-3 qualification results. All three are kept for auditability."""
+    verdicts are the judge's qualification results, each with its one-line reason, and
+    `bare_answer` is the no-document attempt the judge weighed. All are kept for auditability."""
     question               : str
     answer                 : str
     signal                 : str                     # synthesizer's low/high rating of the source unit
     source_ids             : list
     doc_id                 : Optional[str]
-    answer_in_chunk        : Optional[bool] = None   # 3a: answer located in the unit
-    answerable_without_doc : Optional[bool] = None   # 3b: answerable from bare knowledge
+    answer_in_chunk               : Optional[bool] = None   # judge: answer supported by the unit
+    answer_in_chunk_reason        : Optional[str] = None
+    answerable_without_doc        : Optional[bool] = None   # judge: bare answer already covered it
+    answerable_without_doc_reason : Optional[str] = None
+    bare_answer                   : Optional[str] = None    # the no-document attempt fed to the judge
 
 
 # instructor's structured-output target -- the only pydantic surface. Converted to
@@ -118,6 +128,17 @@ class _QAResponse(BaseModel):
     answer   : str
 
 
+# The judge's structured-output target, same instructor seam discipline as _QAResponse:
+# no docstring, no field descriptions (instructor would serialize them into the schema and
+# leak them into the prompt). All judge guidance lives in INSTRUCTION_FOR_QA_JUDGE. Each
+# reason precedes its verdict so the model reasons before committing to the boolean.
+class _JudgeResponse(BaseModel):
+    answer_in_chunk_reason        : str
+    answer_in_chunk               : bool
+    answerable_without_doc_reason : str
+    answerable_without_doc        : bool
+
+
 def _build_qa_messages(passage: str, custom_instruction: Optional[str] = None) -> list[dict]:
     # The generation prompt: a fixed instruction (role + rubric + prohibitions + examples)
     # as the system message, the passage as the user message. An optional custom_instruction
@@ -126,6 +147,40 @@ def _build_qa_messages(passage: str, custom_instruction: Optional[str] = None) -
     return [
         {"role": "system", "content": INSTRUCTION_FOR_QA_SYNTHESIS.format(custom_instructions=block)},
         {"role": "user", "content": f"Passage:\n{passage}\n\nRate the passage's signal, then write one question and its answer."},
+    ]
+
+
+def _build_bare_answer_messages(question: str) -> list[dict]:
+    # The bare-answer probe: the fixed instruction as the system message, the question
+    # alone as the user message -- no passage, no custom_instruction. Stage one of
+    # qualification; its output is the evidence the judge weighs for answerable_without_doc.
+    return [
+        {"role": "system", "content": INSTRUCTION_FOR_BARE_ANSWER},
+        {"role": "user", "content": f"Question:\n{question}"},
+    ]
+
+
+def _build_judge_messages(
+    passage: str,
+    question: str,
+    answer: str,
+    bare_answer: str,
+    custom_instruction: Optional[str] = None,
+) -> list[dict]:
+    # The qualification prompt: the judge instruction as the system message, the pair plus
+    # its bare answer as the user message. The bare answer is the evidence for the
+    # answerable_without_doc verdict -- it was produced in a separate, passage-free call so
+    # "answerable without the document" is a real test, not introspection over visible context.
+    block = CUSTOM_INSTRUCTIONS_BLOCK.format(custom_instruction=custom_instruction.strip()) if custom_instruction else ""
+    return [
+        {"role": "system", "content": INSTRUCTION_FOR_QA_JUDGE.format(custom_instructions=block)},
+        {"role": "user", "content": (
+            f"Passage:\n{passage}\n\n"
+            f"Question:\n{question}\n\n"
+            f"Answer:\n{answer}\n\n"
+            f"Bare answer (the question answered with no access to the passage):\n{bare_answer}\n\n"
+            "Judge the two checks."
+        )},
     ]
 
 
@@ -140,36 +195,16 @@ def _unit_text(unit: Unit) -> str:
     return "\n".join(t for t in (_chunk_text(r) for r in unit.records) if t)
 
 
-def _tokens(text: str) -> set:
-    return set(re.findall(r"\w+", text.lower()))
-
-
-def _overlap(part: str, whole: str) -> float:
-    # Fraction of `part`'s tokens present in `whole`. Robust to the LLM rephrasing,
-    # unlike substring matching; 0.0 when `part` has no tokens.
-    pt = _tokens(part)
-    if not pt:
-        return 0.0
-    return len(pt & _tokens(whole)) / len(pt)
-
-
-# The bare-answer prompt has no response schema to bind to (3b returns free text via a
-# plain completion), so it stays a module constant owned by the qualify step.
-_BARE_SYSTEM = (
-    "Answer the question concisely from your own knowledge. "
-    "If you do not know the answer, say you do not know."
-)
-
-
 # Ordinal ranks for the synthesizer's source-unit rating, so min_signal can compare.
 _SIGNAL_RANK = {"low": 0, "high": 1}
 
 
 def _is_qualified(item: QAItem, min_signal: Optional[str] = None) -> bool:
-    # An item survives when no *enabled* check vetoes it: its signal must reach min_signal
-    # (None disables the gate), 3a must pass (answer in unit), and 3b must not (answerable
-    # without the doc). A disabled overlap check leaves its verdict None, which abstains
-    # rather than vetoes -- so with min_signal None and both overlaps off every item passes.
+    # An item survives when nothing vetoes it: its signal must reach min_signal (None
+    # disables the gate), the answer must be in the unit, and the question must not be
+    # answerable without the doc. When the judge is off both verdicts stay None, which
+    # abstains rather than vetoes -- so with min_signal None and the judge off every item
+    # passes.
     if min_signal is not None and _SIGNAL_RANK[item.signal] < _SIGNAL_RANK[min_signal]:
         return False
     return (item.answer_in_chunk is None or item.answer_in_chunk) \
@@ -178,7 +213,7 @@ def _is_qualified(item: QAItem, min_signal: Optional[str] = None) -> bool:
 
 class Synthesizer:
     """Generate + qualify, records-in. Stateless beyond its instructor client: the
-    per-run model kwargs and overlap thresholds are passed to run(); owns no doc lifecycle."""
+    per-run model kwargs and the enable_qualifier toggle are passed to run(); owns no doc lifecycle."""
 
     def __init__(self):
         # acompletion -> instructor returns an AsyncInstructor; create() is awaitable.
@@ -189,8 +224,7 @@ class Synthesizer:
         samples: list[Unit],
         synthesis_kwargs:dict={},
         qualifier_kwargs:dict={},
-        answer_overlap: Optional[float] = 0.6,
-        bare_overlap: Optional[float] = 0.6,
+        enable_qualifier: bool = True,
         min_signal: Optional[str] = None,
         custom_instruction: Optional[str] = None,
         per_unit: int = 1,
@@ -199,11 +233,10 @@ class Synthesizer:
         cap: Optional[int] = None,
     ) -> list[QAItem]:
         # Generate per_unit QA per sampled unit (each its own LLM call), qualify each, keep
-        # the survivors: the answer
-        # must be in the unit (3a) and the question must not be answerable without the
-        # document (3b). Units run concurrently up to `concurrency` -- generate->qualify
-        # stays sequential per unit (qualify needs the generated question), but distinct
-        # units overlap, so latency-bound LLM calls amortize.
+        # the survivors: the answer must be in the unit and the question must not be
+        # answerable without the document. Units run concurrently up to `concurrency` --
+        # generate->qualify stays sequential per unit (qualify needs the generated question),
+        # but distinct units overlap, so latency-bound LLM calls amortize.
         #
         # cap is a hard ceiling on survivors: once `cap` are kept we stop draining and
         # cancel every still-running / not-yet-started unit, so the run ends without
@@ -225,8 +258,8 @@ class Synthesizer:
                         item,
                         unit,
                         qualifier_kwargs,
-                        answer_overlap=answer_overlap,
-                        bare_overlap=bare_overlap,
+                        enable_qualifier=enable_qualifier,
+                        custom_instruction=custom_instruction,
                     )
                     items.append(item)
             return items
@@ -274,33 +307,42 @@ class Synthesizer:
         item: QAItem,
         unit: Unit,
         qualifier_kwargs:dict={},
-        answer_overlap: Optional[float] = None,
-        bare_overlap: Optional[float] = None,
+        enable_qualifier: bool = True,
+        custom_instruction: Optional[str] = None,
     ) -> None:
 
-        # Either check is optional: a None threshold disables it, leaving its verdict
-        # None ("not evaluated"). 3b's None also skips the bare-answer LLM call. With both
-        # None nothing is qualified and every generated item survives.
+        # enable_qualifier=False disables qualification entirely: both verdicts stay None
+        # ("not evaluated") and every generated item survives. With it on, two sequential
+        # calls: first bare-answer the question with no passage (the behavioural evidence),
+        # then one judge call sees passage + pair + bare answer and returns both verdicts at
+        # once. Both run on qualifier_kwargs; the judge reuses the instructor client.
+        if not enable_qualifier:
+            return
 
-        # 3a: deterministic -- is the answer's content actually in the source unit.
-        if answer_overlap is not None:
-            item.answer_in_chunk = _overlap(item.answer, _unit_text(unit)) >= answer_overlap
-
-        # 3b: behavioural -- let the model answer the question with no document; if its
-        # bare answer matches the gold answer, the question doesn't exercise retrieval.
-        if bare_overlap is not None:
-            bare = await self._bare_answer(item.question, qualifier_kwargs)
-            item.answerable_without_doc = _overlap(bare, item.answer) >= bare_overlap
-
-    async def _bare_answer(self, question: str, qualifier_kwargs:dict={}) -> str:
-        resp = await litellm.acompletion(
+        # Stage one: bare-answer the question with no passage -- free text, so the response
+        # model is a plain str.
+        item.bare_answer = await self._client.chat.completions.create(
             **qualifier_kwargs,
-            messages=[
-                {"role": "system", "content": _BARE_SYSTEM},
-                {"role": "user", "content": question},
-            ],
+            response_model=str,
+            messages=_build_bare_answer_messages(item.question),
         )
-        return resp.choices[0].message.content or ""
+
+        # Stage two: one judge call sees passage + pair + bare answer, returns both verdicts.
+        verdict = await self._client.chat.completions.create(
+            **qualifier_kwargs,
+            response_model=_JudgeResponse,
+            messages=_build_judge_messages(
+                _unit_text(unit),
+                item.question,
+                item.answer,
+                item.bare_answer,
+                custom_instruction,
+            ),
+        )
+        item.answer_in_chunk = verdict.answer_in_chunk
+        item.answer_in_chunk_reason = verdict.answer_in_chunk_reason
+        item.answerable_without_doc = verdict.answerable_without_doc
+        item.answerable_without_doc_reason = verdict.answerable_without_doc_reason
 
 
 class SynthesisArtifact(type(pathlib.Path())):
@@ -495,8 +537,7 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
                 samples,
                 syn_config.synthesis_model,
                 syn_config.qualifier_model,
-                answer_overlap=syn_config.answer_overlap,
-                bare_overlap=syn_config.bare_overlap,
+                enable_qualifier=syn_config.enable_qualifier,
                 min_signal=syn_config.min_signal,
                 custom_instruction=syn_config.custom_instruction,
                 per_unit=syn_config.per_unit,
