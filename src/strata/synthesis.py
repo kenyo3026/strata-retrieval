@@ -28,6 +28,7 @@ import dataclasses
 import json
 import logging
 import pathlib
+import random
 import shutil
 import sys
 from dataclasses import dataclass, field, fields
@@ -81,6 +82,7 @@ class SynthesisConfig:
     min_signal: Optional[str] = None   # drop units the synthesizer rates below this signal; None keeps all
     per_unit: int = 1   # independent synthesis calls per unit, each producing one QA
     cap: Optional[int] = None   # hard ceiling on qualified survivors; stop early once hit
+    shuffle_seed: Optional[int] = None   # seed to shuffle sampled units before synthesis; None keeps sampling order
 
     def setup_models(self, models:dict):
         self.setup_synthesis_model(models)
@@ -514,6 +516,12 @@ async def synthesize(args: SynthesisArgs) -> list[QAItem]:
             artifact.write_records(syn_config.doc_id, records)
             sampler = Sampler(records, syn_config.doc_id)
             samples = _sample(sampler, syn_config.sampler, **syn_config.sampling_kwargs)
+
+            # Shuffle before synthesis so an early `cap` does not bias survivors toward the
+            # front of the sampling order (e.g. all from the first pages). Seeded for
+            # reproducibility; None leaves the sampler's order untouched.
+            if syn_config.shuffle_seed is not None:
+                random.Random(syn_config.shuffle_seed).shuffle(samples)
 
             task = progress.add_task(syn_config.doc_id, total=len(samples), kept=0)
             seen = {"kept": 0}
