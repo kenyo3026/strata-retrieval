@@ -194,10 +194,18 @@ def _chunk_text(record: ChunkRecord) -> str:
     return record.content or record.html or ""
 
 
+def _join_record_text(records: list[ChunkRecord]) -> str:
+    # The single definition of "the text of a span of records": each record's generatable
+    # text joined in the given order, empties dropped. _unit_text uses it at synthesis time;
+    # SynthesisArtifact.ref_text reuses it to reconstitute that same context from source_ids,
+    # so the decoded ref matches the original byte for byte.
+    return "\n".join(t for t in (_chunk_text(r) for r in records) if t)
+
+
 def _unit_text(unit: Unit) -> str:
     # The generatable context of a sampling unit: its records' text joined in reading
     # order. One chunk for a chunk unit, the whole page / section for a many-record one.
-    return "\n".join(t for t in (_chunk_text(r) for r in unit.records) if t)
+    return _join_record_text(unit.records)
 
 
 # Ordinal ranks for the synthesizer's source-unit rating, so min_signal can compare.
@@ -391,6 +399,18 @@ class SynthesisArtifact(type(pathlib.Path())):
     def write_records(self, doc_id: str, records: list[ChunkRecord]) -> None:
         self.mkdir(parents=True, exist_ok=True)
         self.records(doc_id).write_text(self._dump_by_id(records), encoding="utf-8")
+
+    def read_records(self, doc_id: str) -> dict:
+        # The doc's full record universe as written by write_records: {bbox_id: record dict}.
+        return json.loads(self.records(doc_id).read_text(encoding="utf-8"))
+
+    def ref_text(self, doc_id: str, source_ids: list[str]) -> str:
+        # Reconstitute the ref context a QAItem was synthesized from. records.json holds raw
+        # record dicts, so each source id is rebuilt into a ChunkRecord and run back through
+        # _join_record_text -- the same extraction synthesis used, in source_ids order -- so
+        # the result matches the original _unit_text byte for byte.
+        records = self.read_records(doc_id)
+        return _join_record_text([ChunkRecord(**records[sid]) for sid in source_ids])
 
     def write_dataset(self, qa: list[QAItem]) -> None:
         self.mkdir(parents=True, exist_ok=True)
