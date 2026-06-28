@@ -20,6 +20,7 @@ configs/
 docs/
 scripts/
 tryrun/
+outputs/
 
 # Python package development
 *.egg-info/
