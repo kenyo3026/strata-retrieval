@@ -104,7 +104,10 @@ class QAItem:
     ground truth: one id for a chunk unit, the whole span for a page / section unit.
     `signal` is the synthesizer's pre-QA rating of the source unit's worth; the two
     verdicts are the judge's qualification results, each with its one-line reason, and
-    `bare_answer` is the no-document attempt the judge weighed. All are kept for auditability."""
+    `bare_answer` is the no-document attempt the judge weighed. All are kept for auditability.
+    `_id` is the stable join key (`{doc_id}#{n}`, n by sampling order) that aligns this item
+    across the synthesis output, the hand-run agent output, and the assembled eval set."""
+    _id                    : str                     # join key across artifacts: f"{doc_id}#{n}"
     question               : str
     answer                 : str
     signal                 : str                     # synthesizer's low/high rating of the source unit
@@ -251,11 +254,14 @@ class Synthesizer:
         sem = asyncio.Semaphore(concurrency)
         kept = []
 
-        async def process(unit: Unit) -> list[QAItem]:
+        async def process(index: int, unit: Unit) -> list[QAItem]:
             async with sem:
                 items = []
-                for _ in range(per_unit):
-                    item = await self._generate(unit, synthesis_kwargs, custom_instruction)
+                for k in range(per_unit):
+                    # global, deterministic item number: contiguous over (sampling order, per-unit k),
+                    # so the id never depends on completion order or which items survive.
+                    n = index * per_unit + k
+                    item = await self._generate(unit, n, synthesis_kwargs, custom_instruction)
                     await self._qualify(
                         item,
                         unit,
@@ -266,7 +272,7 @@ class Synthesizer:
                     items.append(item)
             return items
 
-        tasks = [asyncio.create_task(process(unit)) for unit in samples]
+        tasks = [asyncio.create_task(process(i, unit)) for i, unit in enumerate(samples)]
         try:
             done = False
             for future in asyncio.as_completed(tasks):
@@ -290,18 +296,20 @@ class Synthesizer:
             await asyncio.gather(*tasks, return_exceptions=True)
         return kept
 
-    async def _generate(self, unit: Unit, synthesis_kwargs:dict={}, custom_instruction: Optional[str] = None) -> QAItem:
+    async def _generate(self, unit: Unit, n: int, synthesis_kwargs:dict={}, custom_instruction: Optional[str] = None) -> QAItem:
         resp = await self._client.chat.completions.create(
             **synthesis_kwargs,
             response_model=_QAResponse,
             messages=_build_qa_messages(_unit_text(unit), custom_instruction),
         )
+        doc_id = unit.records[0].doc_id
         return QAItem(
+            _id=f"{doc_id}#{n}",
             question=resp.question,
             answer=resp.answer,
             signal=resp.signal,
             source_ids=[r.bbox_id for r in unit.records],
-            doc_id=unit.records[0].doc_id,
+            doc_id=doc_id,
         )
 
     async def _qualify(
